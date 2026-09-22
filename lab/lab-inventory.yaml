@@ -1,0 +1,22 @@
+# Inventory for the local FRR lab (make lab). Throwaway credentials.
+#
+# These routers run FRR, not Cisco IOS. device_type is cisco_ios because that
+# is the netmiko driver that speaks to FRR's vtysh (same prompts, same enable,
+# same `conf t`), and netmiko has no FRR driver. Expect IOS-only commands like
+# `show interfaces brief` to be rejected by the device — that is FRR being FRR,
+# not the inventory being wrong.
+devices:
+  r1:
+    host: localhost
+    port: 2211
+    device_type: cisco_ios
+    username: netnerd
+    password: netnerd123
+    writable: true
+  r2:
+    host: localhost
+    port: 2212
+    device_type: cisco_ios
+    username: netnerd
+    password: netnerd123
+    writable: false   # left read-only so the allowlist gate is exercised

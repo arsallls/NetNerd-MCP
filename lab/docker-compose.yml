@@ -1,0 +1,45 @@
+# NetNerd integration lab: two eBGP-peered FRR routers reachable over real SSH.
+# `make lab` brings this up; the integration tests drive it via NetNerd's own
+# SSHDriver + tools — no mocking, per the project's testing convention.
+name: netnerd-lab
+
+services:
+  r1:
+    build: ./frr
+    container_name: netnerd-lab-r1
+    hostname: r1
+    privileged: true
+    volumes:
+      # Seeded, not bind-mounted onto /etc/frr/frr.conf: `write memory` renames
+      # the live file before writing it, and a bind-mounted file cannot be
+      # renamed ("Resource busy") even as root, with or without :ro. The
+      # entrypoint copies this into place so saving works and the repo's copy
+      # stays clean.
+      - ./frr/r1/frr.conf:/seed/frr.conf:ro
+      - ./frr/daemons:/etc/frr/daemons:ro
+    ports:
+      - "2211:22"
+    networks:
+      labnet:
+        ipv4_address: 172.30.0.2
+
+  r2:
+    build: ./frr
+    container_name: netnerd-lab-r2
+    hostname: r2
+    privileged: true
+    volumes:
+      - ./frr/r2/frr.conf:/seed/frr.conf:ro
+      - ./frr/daemons:/etc/frr/daemons:ro
+    ports:
+      - "2212:22"
+    networks:
+      labnet:
+        ipv4_address: 172.30.0.3
+
+networks:
+  labnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
