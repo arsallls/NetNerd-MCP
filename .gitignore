@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.env
+inventory.yaml
+backups/
+netnerd-audit/
+.mcp.json
+*.log
+.DS_Store

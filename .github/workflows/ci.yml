@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Safety gates (no lab needed)
+        run: pytest tests/unit -v
+
+      # The lab is the point: integration tests drive real FRR routers over
+      # real SSH. Nothing here is mocked.
+      - name: Start FRR lab
+        run: |
+          docker compose -f lab/docker-compose.yml up -d --build
+          for i in $(seq 1 60); do
+            nc -z localhost 2211 && nc -z localhost 2212 && exit 0
+            sleep 1
+          done
+          echo "lab failed to start"; docker compose -f lab/docker-compose.yml logs; exit 1
+
+      - name: Integration tests against the lab
+        run: pytest tests/integration -v
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f lab/docker-compose.yml down -v

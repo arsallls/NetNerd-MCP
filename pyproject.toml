@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "netnerd-mcp"
+version = "0.1.0"
+description = "MCP server giving an LLM real hands on network gear — SSH, show commands, and guarded config changes across Cisco, Arista, Juniper and Linux."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [{ name = "Arsal Sajjad" }]
+keywords = ["mcp", "network-automation", "netmiko", "cisco", "network-engineering", "ssh"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Networking",
+]
+dependencies = [
+    "mcp>=1.2.0",
+    "netmiko>=4.3.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+# Genie pulls in pyATS (hundreds of MB). Only needed for structured Cisco
+# parsing — without it, tools return raw CLI text, which the model reads fine.
+parsing = ["genie>=23.0", "pyats>=23.0"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+netnerd-mcp = "netnerd_mcp.server:main"
+
+[project.urls]
+Homepage = "https://github.com/arsallls/NetNerd-MCP"
+Issues = "https://github.com/arsallls/NetNerd-MCP/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["netnerd_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: requires the FRR lab (make lab)"]
