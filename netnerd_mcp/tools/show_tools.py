@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from netnerd_mcp import audit, sessions, vendor
+from netnerd_mcp import audit, sessions, summarize, vendor
 from netnerd_mcp.drivers.ssh_driver import _is_write_command
 from netnerd_mcp.inventory import InventoryError, get_inventory
 
@@ -48,13 +48,31 @@ def show(device: str, command: str, reason: str) -> dict[str, Any]:
         return {"error": f"{type(exc).__name__}: {exc}", "device": target.name}
 
     ms = int((time.monotonic() - started) * 1000)
-    result = {
+    result: dict[str, Any] = {
         "device": target.name,
         "command": command,
-        "output": audit.mask(output),
         "ms": ms,
         "transcript": sessions.format_result(target, command, reason, output, ms),
     }
+
+    # Parsed from the masked text, not the raw: a template that happens to
+    # capture a key or community string must not smuggle it past mask().
+    masked = audit.mask(output)
+    rows = summarize.structured(masked, command, target.device_type)
+    if rows is not None:
+        # Parsed and raw together would be larger than raw alone, which defeats
+        # the point. The raw text is in the session transcript either way.
+        result["format"] = "parsed"
+        result["rows"] = len(rows)
+        result["parsed"] = rows
+    else:
+        result["format"] = "raw"
+        capped = summarize.excerpt(masked)
+        if capped:
+            result["output_excerpt"] = capped.pop("excerpt")
+            result.update(capped)
+        else:
+            result["output"] = masked
 
     # The device answering "% Unknown command" is not a successful read, and
     # spotting that in the text should not be the caller's job.
@@ -125,14 +143,25 @@ def get_config(device: str, reason: str, section: str = "", startup: bool = Fals
     if section:
         output = _section(output, section)
 
-    return {
+    result: dict[str, Any] = {
         "device": target.name,
         "source": "startup" if startup else "running",
         "section": section or None,
         "lines": len(output.splitlines()),
         "total_lines": full_lines,
-        "config": audit.mask(output),
     }
+
+    masked = audit.mask(output)
+    capped = summarize.excerpt(masked)
+    if capped:
+        # Same rule as an unreadable config: a partial result does not get to
+        # be called "config". A caller that wants all of it passes a section.
+        result["config_excerpt"] = capped.pop("excerpt")
+        result.update(capped)
+        result["note"] += " A config excerpt is not a basis for concluding a line is absent."
+    else:
+        result["config"] = masked
+    return result
 
 
 def _section(config: str, section: str) -> str:

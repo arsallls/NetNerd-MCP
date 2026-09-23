@@ -77,6 +77,7 @@ def connection(device: Device) -> Generator[tuple[SSHDriver, BaseConnection], No
         port=device.port,
         session_id=log.session_id,
         session_log=str(log.transcript_path),
+        key_file=device.key_file or None,
     )
 
     driver = SSHDriver()
