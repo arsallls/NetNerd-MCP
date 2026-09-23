@@ -27,9 +27,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Genie pulls in pyATS (hundreds of MB). Only needed for structured Cisco
-# parsing — without it, tools return raw CLI text, which the model reads fine.
+# Genie pulls in pyATS (hundreds of MB). ntc-templates arrives with netmiko and
+# already parses most commands, so this is only for the extra IOS-XE coverage.
 parsing = ["genie>=23.0", "pyats>=23.0"]
+# Read device passwords out of the OS keychain instead of the environment.
+vault = ["keyring>=24.0"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]

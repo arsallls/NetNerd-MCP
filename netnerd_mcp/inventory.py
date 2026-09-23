@@ -1,8 +1,7 @@
 """Device inventory.
 
-A YAML file mapping names to connection details. Secrets are referenced as
-``${ENV_VAR}`` and resolved from the environment, so the inventory itself is
-safe to commit — the convention Ansible and Nornir users already expect.
+A YAML file mapping names to connection details. Secrets are referenced rather
+than written down, so the inventory itself is safe to commit.
 
     devices:
       core-sw1:
@@ -11,6 +10,27 @@ safe to commit — the convention Ansible and Nornir users already expect.
         writable: true
         username: ${NET_USER}
         password: ${NET_PASS}
+
+      edge-rtr1:
+        host: edge-rtr1            # resolved through ~/.ssh/config
+        ssh_config: true
+        password: keyring:netnerd/edge-rtr1
+
+Two reference forms are understood:
+
+``${ENV_VAR}``
+    Read from the environment — the convention Ansible and Nornir users
+    already expect.
+
+``keyring:SERVICE/USERNAME``
+    Read from the OS keychain (macOS Keychain, GNOME Secret Service, Windows
+    Credential Manager) via the optional ``keyring`` package. This is the
+    "encrypted local vault" without inventing a file format: the OS already
+    has one, and it is already unlocked by the user's login.
+
+``ssh_config: true`` fills in hostname, user, port and identity file from
+``~/.ssh/config`` for hosts already configured there. Anything set explicitly
+in the inventory wins over what the SSH config says.
 
 The inventory is also an allowlist: a device that is not listed cannot be
 reached, so the model can never open a session to an arbitrary address it read
@@ -30,6 +50,7 @@ import yaml
 logger = logging.getLogger(__name__)
 
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_KEYRING_REF = re.compile(r"^keyring:([^/]+)/(.+)$")
 
 def _default_paths() -> list[Path]:
     paths = []
@@ -53,6 +74,7 @@ class Device:
     username: str = ""
     password: str = ""
     enable_secret: str = ""
+    key_file: str = ""
     writable: bool = False
 
     def redacted(self) -> dict[str, Any]:
@@ -62,10 +84,34 @@ class Device:
                 "writable": self.writable}
 
 
+def _from_keyring(service: str, username: str) -> str:
+    try:
+        import keyring
+    except ImportError as exc:
+        raise InventoryError(
+            f"Inventory uses 'keyring:{service}/{username}' but the keyring package "
+            f"is not installed. Install it with: pip install 'netnerd-mcp[vault]'"
+        ) from exc
+
+    secret = keyring.get_password(service, username)
+    if secret is None:
+        # Fail closed. Falling through to an empty password would turn a
+        # missing secret into an anonymous login attempt against real gear.
+        raise InventoryError(
+            f"No keychain entry for service '{service}', user '{username}'. "
+            f"Add it with: keyring set {service} {username}"
+        )
+    return secret
+
+
 def _expand(value: Any) -> Any:
-    """Replace ${VAR} references with environment values."""
+    """Resolve ${ENV_VAR} and keyring:SERVICE/USER references."""
     if not isinstance(value, str):
         return value
+
+    ref = _KEYRING_REF.match(value.strip())
+    if ref:
+        return _from_keyring(ref.group(1), ref.group(2))
 
     def sub(m: re.Match) -> str:
         var = m.group(1)
@@ -77,6 +123,37 @@ def _expand(value: Any) -> Any:
         return resolved
 
     return _ENV_REF.sub(sub, value)
+
+
+def _ssh_config_defaults(host: str) -> dict[str, str]:
+    """Look *host* up in ~/.ssh/config, returning only what it defines.
+
+    Paramiko already ships with netmiko, so this costs nothing. Returns an
+    empty mapping when there is no config file or no matching stanza.
+    """
+    path = Path.home() / ".ssh" / "config"
+    if not path.is_file():
+        return {}
+
+    from paramiko import SSHConfig
+
+    try:
+        entry = SSHConfig.from_path(str(path)).lookup(host)
+    except Exception as exc:  # a malformed config should not be fatal
+        logger.warning("Could not read %s for '%s': %s", path, host, exc)
+        return {}
+
+    found: dict[str, str] = {}
+    if entry.get("hostname") and entry["hostname"] != host:
+        found["host"] = entry["hostname"]
+    if entry.get("user"):
+        found["username"] = entry["user"]
+    if entry.get("port"):
+        found["port"] = str(entry["port"])
+    identities = entry.get("identityfile") or []
+    if identities:
+        found["key_file"] = str(Path(identities[0]).expanduser())
+    return found
 
 
 class Inventory:
@@ -113,14 +190,27 @@ class Inventory:
                 raise InventoryError(f"{path}: device '{name}' must be a mapping.")
             if "host" not in cfg:
                 raise InventoryError(f"{path}: device '{name}' is missing 'host'.")
+
+            host = str(_expand(cfg["host"]))
+            # An explicit inventory value always wins; the SSH config only
+            # fills gaps. Otherwise a stanza in ~/.ssh/config could silently
+            # redirect a device the inventory pins to a specific address.
+            defaults = _ssh_config_defaults(host) if cfg.get("ssh_config") else {}
+
+            def field(key: str, fallback: str = "") -> str:
+                if key in cfg:
+                    return str(_expand(cfg[key]))
+                return defaults.get(key, fallback)
+
             devices[name] = Device(
                 name=name,
-                host=str(_expand(cfg["host"])),
+                host=defaults.get("host", host),
                 device_type=str(_expand(cfg.get("device_type", "cisco_ios"))),
-                port=int(_expand(cfg.get("port", 22))),
-                username=str(_expand(cfg.get("username", ""))),
-                password=str(_expand(cfg.get("password", ""))),
-                enable_secret=str(_expand(cfg.get("enable_secret", ""))),
+                port=int(field("port", "22")),
+                username=field("username"),
+                password=field("password"),
+                enable_secret=field("enable_secret"),
+                key_file=field("key_file"),
                 writable=bool(cfg.get("writable", False)),
             )
         logger.info("Loaded %d device(s) from %s", len(devices), path)

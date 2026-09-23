@@ -19,6 +19,7 @@ _ctx_device_type: ContextVar[Optional[str]] = ContextVar("device_type", default=
 _ctx_session_id: ContextVar[Optional[str]] = ContextVar("session_id", default=None)
 _ctx_port: ContextVar[Optional[int]] = ContextVar("device_port", default=None)
 _ctx_session_log: ContextVar[Optional[str]] = ContextVar("session_log", default=None)
+_ctx_key_file: ContextVar[Optional[str]] = ContextVar("key_file", default=None)
 
 
 def set_request_context(
@@ -31,6 +32,7 @@ def set_request_context(
     session_id: Optional[str] = None,
     port: Optional[int] = None,
     session_log: Optional[str] = None,
+    key_file: Optional[str] = None,
 ) -> None:
     """Set the device details for the current call."""
     for var, value in (
@@ -43,6 +45,7 @@ def set_request_context(
         (_ctx_session_id, session_id),
         (_ctx_port, port),
         (_ctx_session_log, session_log),
+        (_ctx_key_file, key_file),
     ):
         if value is not None:
             var.set(value)
@@ -78,6 +81,10 @@ def get_request_port() -> Optional[int]:
 
 def get_request_session_log() -> Optional[str]:
     return _ctx_session_log.get()
+
+
+def get_request_key_file() -> Optional[str]:
+    return _ctx_key_file.get()
 
 
 def is_read_only() -> bool:

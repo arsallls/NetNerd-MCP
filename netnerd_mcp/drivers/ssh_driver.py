@@ -205,13 +205,14 @@ class SSHDriver:
             For other connection-level problems.
         """
         from netnerd_mcp.config.request_context import (
-            get_request_port, get_request_session_log,
+            get_request_key_file, get_request_port, get_request_session_log,
         )
 
         if port is None:
             port = get_request_port() or 22
         if session_log is None:
             session_log = get_request_session_log()
+        key_file = get_request_key_file()
 
         logger.info(
             "Connecting to %s (type=%s, port=%d, read_only=%s)",
@@ -234,6 +235,12 @@ class SSHDriver:
 
         if self.enable_secret:
             device_params["secret"] = self.enable_secret
+
+        if key_file:
+            # Key auth from ~/.ssh/config. The password stays set: netmiko uses
+            # it as the key passphrase, and devices that want both get both.
+            device_params["use_keys"] = True
+            device_params["key_file"] = key_file
 
         try:
             connection = ConnectHandler(**device_params)
