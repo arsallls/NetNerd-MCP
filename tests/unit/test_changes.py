@@ -189,3 +189,118 @@ class TestInverseCommands:
         assert _inverse_commands(
             ["interface lo", "description some text"], keyword_only=True
         ) == ["interface lo", "no description"]
+
+
+class TestInterfaceDetection:
+    """What counts as taking a link down. Narrow on purpose — a detector that
+    fires on anything suspicious produces warnings nobody reads."""
+
+    def test_a_shutdown_in_an_interface_block_is_caught(self):
+        assert changes._interfaces_taken_down(
+            ["interface GigabitEthernet0/1", "shutdown"]) == ["GigabitEthernet0/1"]
+
+    def test_no_shutdown_is_not_a_shutdown(self):
+        """Bringing an interface UP must not be flagged as taking it down."""
+        assert changes._interfaces_taken_down(
+            ["interface GigabitEthernet0/1", "no shutdown"]) == []
+
+    def test_removing_the_interface_outright_is_caught(self):
+        assert changes._interfaces_taken_down(["no interface Vlan10"]) == ["Vlan10"]
+
+    def test_removing_the_address_is_caught(self):
+        assert changes._interfaces_taken_down(
+            ["interface eth0", "no ip address"]) == ["eth0"]
+
+    def test_an_ordinary_change_is_not_flagged(self):
+        assert changes._interfaces_taken_down(
+            ["interface lo", "description peering link"]) == []
+
+    def test_a_shutdown_under_another_block_is_not_blamed_on_the_interface(self):
+        """`shutdown` under `router bgp` is a different command entirely, and
+        blaming the interface configured three lines earlier would be wrong."""
+        assert changes._interfaces_taken_down(
+            ["interface Gi0/1", "description x", "router bgp 65001", "shutdown"]) == []
+
+    def test_several_interfaces_are_all_reported(self):
+        assert changes._interfaces_taken_down(
+            ["interface Gi0/1", "shutdown", "interface Gi0/2", "shutdown"]
+        ) == ["Gi0/1", "Gi0/2"]
+
+
+class TestLinkImpactWithoutAGraph:
+    """The plan has to distinguish "nothing depends on this" from "I don't
+    know". Conflating them is how an agent talks an operator into shutting a
+    transit link."""
+
+    def test_a_change_that_takes_a_link_down_with_no_graph_says_it_does_not_know(self):
+        impact = changes._link_impact("r1", ["interface eth0", "shutdown"], "test")
+
+        assert impact["blast_radius"] is None
+        assert "NOT a finding that nothing depends" in impact["blast_radius_note"]
+        assert "discover_topology" in impact["blast_radius_note"]
+
+    def test_a_harmless_change_says_the_question_was_not_asked(self):
+        impact = changes._link_impact("r1", ["interface lo", "description x"], "test")
+
+        assert impact["blast_radius"] is None
+        assert "no link impact was assessed" in impact["blast_radius_note"]
+
+    def test_the_two_notes_are_different(self):
+        """An agent reading only the note must be able to tell them apart."""
+        unknown = changes._link_impact("r1", ["interface eth0", "shutdown"], "t")
+        harmless = changes._link_impact("r1", ["interface lo", "description x"], "t")
+
+        assert unknown["blast_radius_note"] != harmless["blast_radius_note"]
+
+
+class TestThePlansVerdictIsBinding:
+    """A plan that refused itself must still refuse at apply time.
+
+    apply_change used to re-derive its own verdict from read-only mode and the
+    inventory flag alone, so a plan blocked for any other reason — the
+    topology gate — applied anyway. It was found the hard way: the change under
+    test was `interface eth0 / shutdown`, it reached the lab router, and the
+    resulting connection error looked enough like a refusal that the test
+    passed while the device went off the network.
+    """
+
+    def test_a_blocked_plan_is_refused_at_apply(self):
+        token = _token(blocked_reason="no topology data; run discover_topology")
+
+        result = changes.apply_change(token.id, reason="trying anyway")
+
+        assert "discover_topology" in result["error"]
+        assert token.state == "pending", "a refused change must not be marked applied"
+
+    def test_the_refusal_is_recorded(self):
+        token = _token(blocked_reason="no topology data; run discover_topology")
+        changes.apply_change(token.id, reason="trying anyway")
+
+        blocked = [e for e in audit.current().events()
+                   if e["event"] == "blocked" and e.get("tool") == "apply_change"]
+        assert blocked, "a guardrail nobody can see in the log is not a guardrail"
+        assert blocked[-1]["reason"] == "trying anyway"
+
+    def test_the_refusal_happens_before_the_device_is_touched(self):
+        """No inventory is loaded in these tests, so a resolve would raise. The
+        refusal arriving first proves nothing was contacted."""
+        token = _token(blocked_reason="blocked at plan time")
+
+        result = changes.apply_change(token.id, reason="x")
+
+        assert result["error"] == "blocked at plan time"
+        assert "Unknown device" not in result["error"]
+
+    def test_an_unblocked_plan_still_proceeds_past_the_gate(self):
+        # A name no inventory can resolve, so this stops at the next check
+        # rather than reaching a device. An earlier version used "r1", which
+        # an integration module's NETNERD_INVENTORY made resolvable — the
+        # test would then have pushed a real change to the lab.
+        token = _token(device="no-such-device-anywhere")
+
+        result = changes.apply_change(token.id, reason="normal path")
+
+        # Past the gate, refused by inventory resolution instead — proof the
+        # gate is not simply refusing everything.
+        assert "Unknown device" in result["error"]
+        assert "no-such-device-anywhere" in result["error"]

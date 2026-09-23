@@ -77,6 +77,27 @@ def _connection_alive(conn: BaseConnection) -> bool:
         return False
 
 
+def close_all_connections() -> int:
+    """Close every pooled connection, whatever session opened it.
+
+    Connections are keyed by session, so anything that changes the session id
+    mid-process orphans the previous session's entries — they then sit open
+    until the idle timer reaps them, and enough of them will exhaust sshd's
+    MaxStartups on the far end. Shutdown and end_session use this so nothing
+    is left behind.
+    """
+    with _pool_lock:
+        keys = list(_pool)
+        for key in keys:
+            conn = _pool.pop(key, None)
+            if conn:
+                try:
+                    conn.disconnect()
+                except Exception as exc:
+                    logger.debug("Pool: error closing %s: %s", key, exc)
+        return len(keys)
+
+
 def close_session_connections(session_id: str) -> None:
     """Close all pooled SSH connections for a session.
 

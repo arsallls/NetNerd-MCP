@@ -17,7 +17,8 @@ from netmiko import BaseConnection
 from netnerd_mcp import audit, vendor
 from netnerd_mcp.config.request_context import set_request_context
 from netnerd_mcp.config.settings import settings
-from netnerd_mcp.drivers.ssh_driver import SSHDriver, close_session_connections
+from netnerd_mcp.drivers.ssh_driver import (
+    SSHDriver, close_all_connections, close_session_connections)
 from netnerd_mcp.inventory import Device
 
 logger = logging.getLogger(__name__)
@@ -54,7 +55,10 @@ def close_all(reason: str = "") -> dict[str, Any]:
         devices = sorted(_connected)
         _connected.clear()
 
-    close_session_connections(log.session_id)
+    # Everything, not just this session's: a session id that changed during
+    # the process would otherwise leave connections open with nothing left
+    # holding a reference to them.
+    close_all_connections()
     for name in devices:
         log.event("disconnect", device=name, why=reason or "end_session")
     return {"closed": devices}

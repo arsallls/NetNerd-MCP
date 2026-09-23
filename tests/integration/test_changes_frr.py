@@ -21,7 +21,7 @@ os.environ["NETNERD_READ_ONLY"] = "false"
 from netnerd_mcp import audit, changes, sessions  # noqa: E402
 from netnerd_mcp.config.settings import settings  # noqa: E402
 from netnerd_mcp.inventory import get_inventory, reset_inventory  # noqa: E402
-from netnerd_mcp.tools.show_tools import get_config  # noqa: E402
+from netnerd_mcp.tools.show_tools import get_config, show  # noqa: E402
 
 pytestmark = [pytest.mark.integration, requires_lab]
 
@@ -235,3 +235,103 @@ class TestAuditTrail:
         report = log.write_report().read_text()
         assert plan["token"] in report
         assert "auditing the change loop end to end" in report
+
+
+class TestBlastRadiusInThePlan:
+    """A plan that would cut a device off has to say so before it is applied.
+
+    These run against a graph discovered from the real lab, so the impact is
+    computed from devices rather than from a fixture.
+    """
+
+    @pytest.fixture
+    def mapped(self, tmp_path, monkeypatch):
+        from netnerd_mcp import topology
+        monkeypatch.setattr(settings, "STATE_DIR", str(tmp_path / "state"))
+        topology.reset()
+        topology.discover_topology(reason="mapping the lab before planning a change")
+        yield
+        topology.reset()
+
+    def test_shutting_the_transit_link_warns_that_r2_is_cut_off(self, mapped):
+        plan = changes.plan_change(
+            "r1", ["interface eth0", "shutdown"],
+            reason="checking the plan reports what this would isolate")
+
+        assert plan["blast_radius"] is not None, plan
+        assert plan["blast_radius"]["isolated"] == ["r2"], plan["blast_radius"]
+        assert "r2" in plan["blast_radius_note"]
+        assert "cut off" in plan["blast_radius_note"]
+
+    def test_the_warning_arrives_before_anything_is_applied(self, mapped):
+        """plan_change must not touch the device — the operator gets the
+        warning while the interface is still up."""
+        plan = changes.plan_change(
+            "r1", ["interface eth0", "shutdown"], reason="checking nothing is pushed")
+
+        assert plan["blast_radius"]["isolated"] == ["r2"]
+        assert changes._tokens[plan["token"]].state == "pending"
+
+        # Read the interface itself rather than the config: eth0's address
+        # comes from the kernel, so FRR's running-config never mentions it.
+        brief = show("r1", "show interface brief",
+                     reason="confirming planning did not touch the device")
+        eth0 = [l for l in brief["output"].splitlines() if l.startswith("eth0")]
+        assert eth0 and " up " in eth0[0], eth0
+
+    def test_a_harmless_change_is_not_dressed_up_as_dangerous(self, mapped):
+        plan = changes.plan_change(
+            "r1", ["interface lo", f"description {MARKER}"],
+            reason="a description change takes no link down")
+
+        assert plan["blast_radius"] is None
+        assert "no link impact was assessed" in plan["blast_radius_note"]
+
+    def test_what_isolates_a_device_is_recorded_in_the_audit_trail(self, mapped):
+        changes.plan_change(
+            "r1", ["interface eth0", "shutdown"], reason="auditing the impact finding")
+
+        plans = [e for e in audit.current().events() if e["event"] == "plan"]
+        assert plans[-1]["isolates"] == ["r2"]
+
+    def test_an_undiscovered_device_does_not_come_back_as_all_clear(self, tmp_path, monkeypatch):
+        """No graph at all is the dangerous case: silence reads as safety."""
+        from netnerd_mcp import topology
+        monkeypatch.setattr(settings, "STATE_DIR", str(tmp_path / "empty"))
+        topology.reset()
+
+        plan = changes.plan_change(
+            "r1", ["interface eth0", "shutdown"], reason="planning with no graph")
+
+        assert plan["blast_radius"] is None
+        assert "NOT a finding" in plan["blast_radius_note"]
+        assert plan["applicable"] is True, "the default must inform, not block"
+        topology.reset()
+
+    def test_the_optional_gate_refuses_the_change_outright(self, tmp_path, monkeypatch):
+        from netnerd_mcp import topology
+        monkeypatch.setattr(settings, "STATE_DIR", str(tmp_path / "empty"))
+        monkeypatch.setattr(settings, "REQUIRE_TOPOLOGY_FOR_WRITES", True)
+        topology.reset()
+
+        plan = changes.plan_change(
+            "r1", ["interface eth0", "shutdown"], reason="gate is on, graph is empty")
+
+        assert plan["applicable"] is False
+        assert "discover_topology" in plan["note"]
+
+        applied = changes.apply_change(plan["token"], reason="should not get through")
+
+        # Assert on WHY it was refused. An earlier version of this test only
+        # checked that an error came back — and it passed while the change was
+        # being pushed, because shutting eth0 killed the SSH session and the
+        # resulting connection error looked like a refusal. It took the lab
+        # down every run until the assertion was tightened.
+        assert "discover_topology" in applied["error"], applied
+        assert changes._tokens[plan["token"]].state == "pending", \
+            "a refused change must not be marked applied"
+
+        brief = show("r1", "show interface brief", reason="confirming eth0 was untouched")
+        eth0 = [l for l in brief["output"].splitlines() if l.startswith("eth0")]
+        assert eth0 and " up " in eth0[0], f"the refused change reached the device: {eth0}"
+        topology.reset()

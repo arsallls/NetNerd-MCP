@@ -58,7 +58,9 @@ nothing has been discovered yet — never that nothing is connected.
 
 Changing configuration:
   1. plan_change  — validates the commands, backs the device up, returns a token
-  2. show the operator the exact commands and wait for them to agree
+  2. show the operator the exact commands AND the plan's blast_radius_note, then
+     wait for them to agree. A blast_radius of null never means "nothing breaks"
+     — read the note, which says whether the question could be answered at all.
   3. apply_change — pushes them; the change now reverts by itself on a timer
   4. show         — verify on the device that it did what was intended
   5. confirm_change if healthy, rollback if not
