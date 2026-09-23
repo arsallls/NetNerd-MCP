@@ -17,7 +17,20 @@ RUN apk add --no-cache openssh-server shadow \
  && adduser -D -s /bin/sh netshell \
  && echo 'netshell:netnerd123' | chpasswd \
  && apk add --no-cache iproute2 \
- && sed -i 's/^#*PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+ && sed -i 's/^#*PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config \
+ # The suite opens a fresh session per test, and any connection abandoned
+ # mid-handshake holds an unauthenticated slot until LoginGraceTime expires.
+ # At the stock 10:30:100 that starts randomly dropping connections partway
+ # through a run, which surfaces as "Error reading SSH protocol banner" on
+ # tests that have nothing wrong with them. Real switches are not this
+ # sensitive; this is the lab keeping up with the tests.
+ # ClientAlive matters more than it looks: an SSH session whose client goes
+ # away without closing keeps running, and it holds an inherited copy of the
+ # listening socket. If the listener then dies, port 22 stays bound by those
+ # orphans and no new sshd can take over — the container passes a port check
+ # and refuses every connection. Reaping dead sessions is what makes that
+ # recoverable.
+ && printf '\nMaxStartups 100:30:200\nMaxSessions 100\nLoginGraceTime 20\nClientAliveInterval 15\nClientAliveCountMax 2\nTCPKeepAlive yes\n' >> /etc/ssh/sshd_config
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
