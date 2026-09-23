@@ -25,9 +25,9 @@ jobs:
         run: pytest tests/unit -v
 
       - name: Install the optional protocol extras
-        run: pip install -e ".[dev,netconf,vault]"
+        run: pip install -e ".[dev,netconf,gnmi,vault]"
 
-      - name: Safety gates with NETCONF and keyring available
+      - name: Safety gates with every optional protocol available
         run: pytest tests/unit -v
 
       # The lab is the point: integration tests drive real FRR routers over
@@ -44,21 +44,22 @@ jobs:
       - name: Integration tests against the lab
         run: pytest tests/integration -v
 
-      # The NETCONF node builds four C libraries from source, so it is not in
-      # the fast lab. It is the only thing that proves confirmed-commit.
-      - name: Start the NETCONF node
+      # These two are not in the fast lab: netopeer2 builds four C libraries
+      # from source. They are the only things that prove confirmed-commit and
+      # streaming telemetry, neither of which FRR can do.
+      - name: Start the NETCONF and gNMI nodes
         run: |
-          docker compose -f lab/docker-compose.yml --profile full up -d --build netconf1
+          docker compose -f lab/docker-compose.yml --profile full up -d --build netconf1 gnmi1
           for i in $(seq 1 90); do
-            nc -z localhost 2230 && exit 0
+            nc -z localhost 2230 && nc -z localhost 57400 && exit 0
             sleep 1
           done
-          echo "netconf node failed to start"
-          docker compose -f lab/docker-compose.yml --profile full logs netconf1
+          echo "protocol nodes failed to start"
+          docker compose -f lab/docker-compose.yml --profile full logs netconf1 gnmi1
           exit 1
 
-      - name: NETCONF tests
-        run: pytest tests/integration/test_netconf.py -v
+      - name: NETCONF and gNMI tests
+        run: pytest tests/integration/test_netconf.py tests/integration/test_gnmi.py -v
 
       - name: Tear down
         if: always()
