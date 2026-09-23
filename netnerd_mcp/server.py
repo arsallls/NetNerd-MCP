@@ -3,7 +3,7 @@
 Runs as a local subprocess of the MCP client (stdio transport). Nothing is
 hosted; device credentials never leave the machine.
 
-Twelve tools: six that read, five that change configuration through a
+Thirteen tools: seven that read, five that change configuration through a
 token-gated plan/apply/confirm loop, and one that closes the session and
 writes the report.
 Safety is enforced here in server code, not in the client's prompt — the token
@@ -23,7 +23,7 @@ from mcp.types import ToolAnnotations
 from netnerd_mcp import audit, changes, sessions, topology
 from netnerd_mcp.config.settings import settings
 from netnerd_mcp.inventory import get_inventory
-from netnerd_mcp.tools import get_config, list_devices, show
+from netnerd_mcp.tools import get_config, list_devices, show, telemetry
 
 try:
     from importlib.metadata import version as _pkg_version
@@ -49,6 +49,10 @@ address that is not in the inventory cannot be reached.
 Diagnosing: use `show` for commands and `get_config` for configuration. Read
 the device rather than inferring its state from its name or from memory; never
 invent interface names, VLAN IDs or addresses.
+
+Telemetry: on devices that support it, `telemetry` watches counters for a few
+seconds and reports what they did — use it when the question is whether
+something is happening now, which a single reading cannot answer.
 
 Topology: discover_topology walks the devices once and stores how they connect;
 query_topology then answers neighbour, path and blast-radius questions from
@@ -97,6 +101,7 @@ READ_TOOLS = [
     changes.plan_change,      # reads the device and issues a token; sends no config
     topology.discover_topology,  # runs show commands only
     topology.query_topology,
+    telemetry,
     sessions.get_transcript,
     sessions.end_session,
 ]
