@@ -15,10 +15,19 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install
+      - name: Install (core only, no optional protocols)
         run: pip install -e ".[dev]"
 
-      - name: Safety gates (no lab needed)
+      # Run once without ncclient or httpx installed. The extras are optional
+      # by design, so a core install has to work — and the NETCONF transport
+      # has to be absent cleanly rather than half-present.
+      - name: Safety gates on a core install
+        run: pytest tests/unit -v
+
+      - name: Install the optional protocol extras
+        run: pip install -e ".[dev,netconf,vault]"
+
+      - name: Safety gates with NETCONF and keyring available
         run: pytest tests/unit -v
 
       # The lab is the point: integration tests drive real FRR routers over
@@ -35,6 +44,22 @@ jobs:
       - name: Integration tests against the lab
         run: pytest tests/integration -v
 
+      # The NETCONF node builds four C libraries from source, so it is not in
+      # the fast lab. It is the only thing that proves confirmed-commit.
+      - name: Start the NETCONF node
+        run: |
+          docker compose -f lab/docker-compose.yml --profile full up -d --build netconf1
+          for i in $(seq 1 90); do
+            nc -z localhost 2230 && exit 0
+            sleep 1
+          done
+          echo "netconf node failed to start"
+          docker compose -f lab/docker-compose.yml --profile full logs netconf1
+          exit 1
+
+      - name: NETCONF tests
+        run: pytest tests/integration/test_netconf.py -v
+
       - name: Tear down
         if: always()
-        run: docker compose -f lab/docker-compose.yml down -v
+        run: docker compose -f lab/docker-compose.yml --profile full down -v
