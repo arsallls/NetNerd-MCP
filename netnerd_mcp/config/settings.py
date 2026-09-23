@@ -72,6 +72,14 @@ class Settings(BaseSettings):
             "Env: NETNERD_REQUIRE_TOPOLOGY_FOR_WRITES."
         ),
     )
+    MAX_TELEMETRY_SEC: int = Field(
+        default=30,
+        description=(
+            "Longest a telemetry subscription may sample for. A tool call that "
+            "never returns wedges the client session, so the window is bounded "
+            "here rather than trusted to the caller."
+        ),
+    )
     MAX_OUTPUT_LINES: int = Field(
         default=200,
         description=(

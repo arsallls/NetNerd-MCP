@@ -27,9 +27,9 @@ def _run(coro):
 
 
 class TestRegistration:
-    def test_the_tool_surface_is_twelve_primitives(self):
+    def test_the_tool_surface_is_thirteen_primitives(self):
         tools = _run(server.list_tools())
-        assert len(tools) == 12, [t.name for t in tools]
+        assert len(tools) == 13, [t.name for t in tools]
 
     def test_read_tools_are_annotated_read_only(self):
         by_name = {t.name: t for t in _run(server.list_tools())}

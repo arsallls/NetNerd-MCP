@@ -45,3 +45,15 @@ devices:
     username: netnerd
     password: netnerd123
     writable: true
+
+  # A gNMI target (make lab-full). Read-only here: gNMI Set exists but the
+  # change loop's rollback story is NETCONF's confirmed-commit, so writes stay
+  # on the transports that can undo themselves.
+  gnmi1:
+    host: localhost
+    port: 57400
+    device_type: gnmi
+    protocols: [gnmi]
+    username: netnerd
+    password: netnerd123
+    writable: false

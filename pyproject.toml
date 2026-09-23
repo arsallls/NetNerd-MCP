@@ -36,6 +36,8 @@ vault = ["keyring>=24.0"]
 # NETCONF (RFC 6241) and RESTCONF (RFC 8040) transports. NETCONF brings
 # confirmed-commit, where the device reverts an unconfirmed change itself.
 netconf = ["ncclient>=0.6.15", "httpx>=0.27"]
+# gNMI: structured reads and bounded streaming telemetry.
+gnmi = ["pygnmi>=0.8"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]

@@ -49,6 +49,13 @@ requires_netconf = pytest.mark.skipif(
     reason="NETCONF node not running — start it with `make lab-full`",
 )
 
+GNMI_NODE = {"host": "localhost", "port": 57400}
+
+requires_gnmi = pytest.mark.skipif(
+    not _port_open(GNMI_NODE["host"], GNMI_NODE["port"]),
+    reason="gNMI target not running — start it with `make lab-full`",
+)
+
 
 @pytest.fixture(autouse=True)
 def close_pooled_connections():

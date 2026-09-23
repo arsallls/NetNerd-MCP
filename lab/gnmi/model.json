@@ -1,0 +1,43 @@
+{
+  "openconfig-interfaces:interfaces": {
+    "interface": [
+      {
+        "name": "eth0",
+        "config": {
+          "name": "eth0",
+          "description": "lab uplink",
+          "enabled": true,
+          "mtu": 1500
+        }
+      },
+      {
+        "name": "eth1",
+        "config": {
+          "name": "eth1",
+          "description": "lab access port",
+          "enabled": true,
+          "mtu": 1500
+        }
+      },
+      {
+        "name": "lo0",
+        "config": {
+          "name": "lo0",
+          "description": "loopback",
+          "enabled": true
+        }
+      }
+    ]
+  },
+  "openconfig-system:system": {
+    "config": {
+      "hostname": "gnmi1",
+      "domain-name": "netnerd.lab"
+    },
+    "clock": {
+      "config": {
+        "timezone-name": "UTC"
+      }
+    }
+  }
+}
