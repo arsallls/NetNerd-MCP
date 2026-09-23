@@ -580,9 +580,14 @@ def confirm_change(token: str, reason: str) -> dict[str, Any]:
     # nothing watching it.
     device_confirmation = None
     try:
-        target = _resolve(change.device)
-        transport = transports.for_device(target)
-        if CONFIRMED_COMMIT in transport.capabilities():
+        # Decided at plan time and carried on the token, rather than worked out
+        # again now. A change pushed over SSH is held by a timer in this
+        # process and the device knows nothing about it, so contacting the
+        # device to "confirm" would be pointless — and would make confirming
+        # fail whenever the device happened to be unreachable.
+        if CONFIRMED_COMMIT.replace("_", "-") in change.mechanism:
+            target = _resolve(change.device)
+            transport = transports.for_device(target, require=CONFIRMED_COMMIT)
             device_confirmation = transport.confirm(target)
     except (InventoryError, TransportError) as exc:
         audit.current().event("error", device=change.device, tool="confirm_change",
