@@ -30,14 +30,15 @@ from typing import Optional
 
 from netnerd_mcp import sessions
 from netnerd_mcp.drivers.base import (
-    CONFIRMED_COMMIT, INTERACTIVE, STRUCTURED, DeviceRejected, Transport,
-    TransportError)
+    CONFIRMED_COMMIT, INTERACTIVE, STRUCTURED, TELEMETRY, DeviceRejected,
+    Transport, TransportError)
 from netnerd_mcp.inventory import Device
 
 logger = logging.getLogger(__name__)
 
 NETCONF_PORT = 830
 RESTCONF_PORT = 443
+GNMI_PORT = 57400
 
 
 class SSHTransport:
@@ -292,11 +293,6 @@ class RestconfTransport:
 # Selection
 # ---------------------------------------------------------------------------
 
-_BY_NAME = {
-    "ssh": SSHTransport,
-    "netconf": NetconfTransport,
-    "restconf": RestconfTransport,
-}
 
 
 def _available(name: str) -> bool:
@@ -370,3 +366,252 @@ def for_device(device: Device, require: Optional[str] = None) -> Transport:
     raise TransportError(
         f"No usable transport for {device.name}. Listed protocols: {listed}. "
         + "; ".join(why_not))
+
+
+class GnmiTransport:
+    """gNMI (gRPC Network Management Interface). Reads only, by choice.
+
+    Two things it is for. `get_config` fetches OpenConfig paths as a snapshot,
+    which is the "high-speed structured retrieval" a CLI screen-scrape is a
+    poor substitute for. `sample` subscribes for a bounded number of seconds
+    and returns what the counters *did* — the question "is this interface
+    dropping packets right now" has no good answer in a single snapshot.
+
+    gNMI has a Set RPC, and it is deliberately not wired into the change loop.
+    A change here would have no way to undo itself: gNMI has no equivalent of
+    NETCONF's confirmed-commit, so a gNMI write would fall back to replaying a
+    backup, which is the weakest rollback available. Devices that speak gNMI
+    almost always speak NETCONF too, and that is the transport a change should
+    go through.
+    """
+
+    name = "gnmi"
+
+    def __init__(self) -> None:
+        try:
+            from pygnmi.client import gNMIclient  # noqa: F401
+        except ImportError as exc:
+            raise TransportError(
+                "gNMI needs the pygnmi package: pip install 'netnerd-mcp[gnmi]'"
+            ) from exc
+
+    def capabilities(self) -> set[str]:
+        return {STRUCTURED, TELEMETRY}
+
+    def _client(self, device: Device, timeout: Optional[int] = None):
+        from pygnmi.client import gNMIclient
+        return gNMIclient(
+            target=(device.host, device.port if device.port != 22 else GNMI_PORT),
+            username=device.username,
+            password=device.password,
+            # Lab and brownfield gear present self-signed certificates; the
+            # inventory is the allowlist, not the certificate chain.
+            insecure=False,
+            skip_verify=True,
+            gnmi_timeout=timeout or 30,
+        )
+
+    def get_config(self, device: Device, startup: bool = False) -> str:
+        import json
+
+        from netnerd_mcp import audit
+        if startup:
+            raise TransportError(
+                "gNMI has no startup datastore — it reads operational and "
+                "intended state, not a boot config. This is NOT a finding that "
+                "the startup config is empty.")
+        try:
+            with self._client(device) as client:
+                result = client.get(path=["/"], encoding="json_ietf")
+        except Exception as exc:
+            raise TransportError(f"gNMI Get failed on {device.name}: {exc}") from exc
+
+        text = json.dumps(result, indent=2, default=str)
+        audit.current().event("command", device=device.name, tool="get_config",
+                              cmd="gnmi Get /", reason="reading config",
+                              bytes=len(text))
+        return text
+
+    def sample(self, device: Device, paths: list[str], seconds: int,
+               reason: str) -> dict:
+        """Subscribe for *seconds*, and summarise what changed.
+
+        Returns per-path first/last/min/max/delta and a sample count rather
+        than the update stream. A stream is unbounded and a model reading one
+        would fill its context with numbers it has to difference by hand —
+        the summary is the answer to the question actually being asked.
+        """
+        import time as _time
+
+        from netnerd_mcp import audit
+
+        subscribe = {
+            "subscription": [
+                {"path": path, "mode": "sample", "sample_interval": 1_000_000_000}
+                for path in paths
+            ],
+            "mode": "stream",
+            "encoding": "json_ietf",
+        }
+
+        seen: dict[str, list] = {path: [] for path in paths}
+        samples = 0
+
+        # Iterating a subscription blocks until the device sends something, so
+        # a path it never reports would hang here forever and wedge the
+        # session — `seconds` would be a suggestion, not a bound. pygnmi's
+        # gnmi_timeout does not apply to a stream, so the read happens on a
+        # worker and this side closes the channel when the window is up, which
+        # is what actually ends it.
+        #
+        # ponytail: a thread per call, for calls that last seconds and are made
+        # one at a time. Worth revisiting only if telemetry becomes continuous.
+        import queue
+        import threading
+
+        client = self._client(device, timeout=seconds + 5)
+        inbox: queue.Queue = queue.Queue()
+        finished = object()
+
+        def _pump() -> None:
+            try:
+                for update in client.subscribe_stream(subscribe=subscribe):
+                    inbox.put(update)
+            except Exception as exc:  # closing the channel lands here
+                inbox.put(exc)
+            finally:
+                inbox.put(finished)
+
+        failure: Optional[Exception] = None
+        client.connect()
+        worker = threading.Thread(target=_pump, daemon=True, name=f"gnmi-{device.name}")
+        worker.start()
+
+        deadline = _time.monotonic() + seconds
+        try:
+            while True:
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    item = inbox.get(timeout=remaining)
+                except queue.Empty:
+                    break
+                if item is finished:
+                    break
+                if isinstance(item, Exception):
+                    failure = item
+                    break
+                for notification in (item.get("update", {}) or {}).get("update", []) or []:
+                    path = "/" + str(notification.get("path", "")).lstrip("/")
+                    value = notification.get("val")
+                    # Match a returned leaf back to whichever requested path it
+                    # sits under; gNMI answers with the full path, not the one
+                    # that was asked for.
+                    for requested in paths:
+                        if path.startswith(requested.rstrip("/")) or requested in path:
+                            seen[requested].append(value)
+                            break
+                samples += 1
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
+            worker.join(timeout=2)
+
+        # Drain whatever the worker queued after the window closed. A device
+        # that refuses a path often only says so when the stream ends, and by
+        # then the loop above has stopped reading — so without this the
+        # refusal is thrown away.
+        #
+        # It does not always arrive in time: some servers only surface the
+        # error once the channel is torn down, after the join has given up.
+        # That is why an empty path's note refuses to conclude the path does
+        # not exist rather than assuming silence means absence.
+        while failure is None:
+            try:
+                leftover = inbox.get_nowait()
+            except queue.Empty:
+                break
+            if isinstance(leftover, Exception):
+                failure = leftover
+
+        # A cancelled stream is how a bounded subscription ends. Anything else
+        # is the device saying something, and what it said belongs in the
+        # result: "the path does not exist on this device" is a definite
+        # answer, and reporting it as "nothing arrived" would turn a fact into
+        # a shrug the caller has to guess at.
+        rejected = ""
+        if failure is not None and not _expected_stream_end(failure):
+            rejected = str(failure).strip()
+
+        summary = {path: _summarise(values, rejected) for path, values in seen.items()}
+        audit.current().event("command", device=device.name, tool="telemetry",
+                              cmd=f"gnmi Subscribe ({seconds}s)", reason=reason,
+                              paths=paths, samples=samples, rejected=rejected or None)
+
+        result: dict = {"seconds": seconds, "samples": samples, "paths": summary}
+        if rejected:
+            result["device_rejected"] = rejected
+        return result
+
+    def apply(self, device: Device, commands: list[str],
+              confirm_timeout_min: int = 0) -> str:
+        raise TransportError(
+            "Configuration is not pushed over gNMI by this server. gNMI has no "
+            "confirmed-commit, so a change made this way could only be undone "
+            "by replaying a backup — the weakest rollback available. Use the "
+            "device's NETCONF or CLI transport for changes.")
+
+    def confirm(self, device: Device) -> str:
+        raise TransportError("gNMI makes no changes here, so there is nothing to confirm.")
+
+
+def _expected_stream_end(exc: Exception) -> bool:
+    """Whether an exception is just the bounded window closing."""
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(word in text for word in
+               ("deadline", "cancelled", "canceled", "stream removed"))
+
+
+def _summarise(values: list, rejected: str = "") -> dict:
+    """First, last and range of a sampled leaf.
+
+    Non-numeric values are reported as the set of states seen, because
+    averaging an interface's oper-status is meaningless.
+    """
+    if not values:
+        if rejected:
+            return {"samples": 0, "device_rejected": rejected,
+                    "note": "The device refused this path rather than simply "
+                            "not reporting it. Check the path against the "
+                            "models the device actually implements."}
+        return {"samples": 0,
+                "note": "No update arrived for this path during the window. That "
+                        "is NOT a reading of zero and NOT proof the path does not "
+                        "exist — the counter may just not have been sampled. Try "
+                        "a longer window, or read it with get_config."}
+
+    numbers = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    if len(numbers) != len(values):
+        return {"samples": len(values), "values_seen": sorted({str(v) for v in values})}
+
+    return {
+        "samples": len(numbers),
+        "first": numbers[0],
+        "last": numbers[-1],
+        "min": min(numbers),
+        "max": max(numbers),
+        "delta": numbers[-1] - numbers[0],
+    }
+
+
+# Declared last so every transport class above it exists. Order here is not
+# preference — `for_device` follows the order the inventory lists.
+_BY_NAME = {
+    "ssh": SSHTransport,
+    "netconf": NetconfTransport,
+    "restconf": RestconfTransport,
+    "gnmi": GnmiTransport,
+}

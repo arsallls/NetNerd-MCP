@@ -25,6 +25,7 @@ from netnerd_mcp.inventory import Device
 CONFIRMED_COMMIT = "confirmed_commit"  # the device reverts itself on a timer
 STRUCTURED = "structured"              # config is data, not screen-scraped text
 INTERACTIVE = "interactive"            # arbitrary CLI commands can be run
+TELEMETRY = "telemetry"                # counters can be sampled over time
 
 
 class TransportError(RuntimeError):
