@@ -60,6 +60,24 @@ services:
       labnet:
         ipv4_address: 172.30.0.4
 
+  # A gNMI target, for the same reason netconf1 exists: nothing else in the
+  # lab speaks the protocol, and shipping a transport on the strength of the
+  # spec alone is how this project has never found a bug.
+  #
+  # google/gnxi is the reference implementation from the gNMI authors, so
+  # passing against it means standards-compliant rather than merely compatible
+  # with one vendor. Go, so unlike netopeer2 it builds in seconds.
+  gnmi1:
+    build: ./gnmi
+    container_name: netnerd-lab-gnmi1
+    hostname: gnmi1
+    profiles: ["full"]
+    ports:
+      - "57400:57400"
+    networks:
+      labnet:
+        ipv4_address: 172.30.0.5
+
 networks:
   labnet:
     driver: bridge

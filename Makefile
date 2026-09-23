@@ -11,11 +11,11 @@ lab:  ## Build and start the FRR integration lab
 
 lab-full:  ## Start the lab plus the NETCONF node (builds netopeer2 from source)
 	docker compose -f lab/docker-compose.yml --profile full up -d --build
-	@echo "Waiting for SSH on r1/r2 and NETCONF on netconf1..."
+	@echo "Waiting for SSH on r1/r2 NETCONF on netconf1 and gNMI on gnmi1..."
 	@for i in $$(seq 1 90); do \
 		nc -z localhost 2211 2>/dev/null && nc -z localhost 2212 2>/dev/null \
-			&& nc -z localhost 2230 2>/dev/null \
-			&& echo "lab up: r1=2211 r2=2212 netconf1=2230 (netnerd/netnerd123)" && exit 0; \
+			&& nc -z localhost 2230 2>/dev/null && nc -z localhost 57400 2>/dev/null \
+			&& echo "lab up: r1=2211 r2=2212 netconf1=2230 gnmi1=57400 (netnerd/netnerd123)" && exit 0; \
 		sleep 1; \
 	done; \
 	echo "lab did not come up in 90s — check 'make lab-logs'"; exit 1
