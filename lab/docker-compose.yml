@@ -1,6 +1,11 @@
 # NetNerd integration lab: two eBGP-peered FRR routers reachable over real SSH.
 # `make lab` brings this up; the integration tests drive it via NetNerd's own
 # SSHDriver + tools — no mocking, per the project's testing convention.
+#
+# Every published port is pinned to 127.0.0.1. Docker's default is 0.0.0.0,
+# which would put a router with a published throwaway password on every
+# interface of the host — and these containers are privileged, so reaching one
+# is reaching root. Nothing outside this machine needs to talk to the lab.
 name: netnerd-lab
 
 services:
@@ -18,7 +23,7 @@ services:
       - ./frr/r1/frr.conf:/seed/frr.conf:ro
       - ./frr/daemons:/etc/frr/daemons:ro
     ports:
-      - "2211:22"
+      - "127.0.0.1:2211:22"
     networks:
       labnet:
         ipv4_address: 172.30.0.2
@@ -32,7 +37,7 @@ services:
       - ./frr/r2/frr.conf:/seed/frr.conf:ro
       - ./frr/daemons:/etc/frr/daemons:ro
     ports:
-      - "2212:22"
+      - "127.0.0.1:2212:22"
     networks:
       labnet:
         ipv4_address: 172.30.0.3
@@ -55,7 +60,7 @@ services:
     hostname: netconf1
     profiles: ["full"]
     ports:
-      - "2230:830"
+      - "127.0.0.1:2230:830"
     networks:
       labnet:
         ipv4_address: 172.30.0.4
@@ -73,7 +78,7 @@ services:
     hostname: gnmi1
     profiles: ["full"]
     ports:
-      - "57400:57400"
+      - "127.0.0.1:57400:57400"
     networks:
       labnet:
         ipv4_address: 172.30.0.5
