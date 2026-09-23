@@ -13,3 +13,4 @@ netnerd-audit/
 .mcp.json
 *.log
 .DS_Store
+.claude/settings.local.json
