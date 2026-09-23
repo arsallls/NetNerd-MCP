@@ -41,6 +41,26 @@ requires_lab = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(autouse=True)
+def close_pooled_connections():
+    """Hand back every SSH session a test opened.
+
+    Connections are pooled per audit session, and the fixtures that reset the
+    audit log between tests change the session id — which orphans the pooled
+    connections rather than closing them. Left alone they accumulate until
+    sshd's MaxStartups refuses the lab entirely, and the whole suite fails with
+    "Error reading SSH protocol banner" on tests that have nothing wrong with
+    them. Production closes these through end_session and the idle timer; tests
+    have to do it themselves.
+    """
+    yield
+    from netnerd_mcp import sessions
+    try:
+        sessions.close_all(reason="test finished")
+    except Exception:  # a teardown failure must not mask the test's own result
+        pass
+
+
 @pytest.fixture(scope="session")
 def r1() -> dict:
     return LAB_NODES["r1"]
