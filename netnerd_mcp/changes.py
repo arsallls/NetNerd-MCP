@@ -11,6 +11,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import logging
+import re
 import secrets
 import threading
 import time
@@ -18,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from netnerd_mcp import audit, sessions, vendor
+from netnerd_mcp import audit, sessions, topology, vendor
 from netnerd_mcp.config.request_context import is_read_only
 from netnerd_mcp.config.settings import settings
 from netnerd_mcp.inventory import Device, InventoryError, get_inventory
@@ -42,6 +43,11 @@ class ChangeToken:
     mechanism: str
     state: str = "pending"  # pending → applied → confirmed | rolled_back | expired
     timer: Optional[threading.Timer] = field(default=None, repr=False)
+    # Why planning refused this, if it did. Carried on the token because
+    # apply_change must reach the same verdict plan_change showed the
+    # operator — a plan marked not applicable that applies anyway is not a
+    # gate, and the operator agreed to what the plan said.
+    blocked_reason: Optional[str] = None
 
     def expired(self) -> bool:
         return datetime.now(tz=timezone.utc) > self.expires_at
@@ -57,6 +63,121 @@ _lock = threading.RLock()
 
 def _resolve(name: str) -> Device:
     return get_inventory().resolve(name)
+
+
+# Commands that take an interface out of service. Deliberately short: a
+# command that is merely *suspicious* would produce warnings nobody reads, and
+# the value of this is that it fires only when a link really does go away.
+# `no shutdown` must not match, which is why this anchors rather than searches.
+_TAKES_A_LINK_DOWN = re.compile(
+    r"^(shutdown|no\s+ip\s+address|no\s+ipv6\s+address|no\s+switchport)\b", re.I)
+
+# Top-level keywords that end an interface block, so a `shutdown` under
+# `router bgp` is not blamed on the interface configured three lines earlier.
+_LEAVES_INTERFACE = ("router ", "line ", "vlan ", "vrf ", "ip route", "exit",
+                     "end", "policy-map", "class-map", "route-map")
+
+
+def _interfaces_taken_down(commands: list[str]) -> list[str]:
+    """Interfaces this command list would take out of service."""
+    at_risk: list[str] = []
+    context = ""
+    for raw in commands:
+        line = raw.strip()
+        if not line or line.startswith("!"):
+            continue
+        low = line.lower()
+        if low.startswith("no interface "):
+            at_risk.append(line[len("no interface "):].strip())
+            context = ""
+        elif low.startswith("interface "):
+            context = line[len("interface "):].strip()
+        elif low.startswith(_LEAVES_INTERFACE):
+            context = ""
+        elif context and _TAKES_A_LINK_DOWN.match(line):
+            at_risk.append(context)
+    return sorted(set(at_risk))
+
+
+def _link_impact(device: str, commands: list[str], reason: str) -> dict[str, Any]:
+    """What this change would cut off, according to the topology graph.
+
+    Always returns a note, including when it has nothing to say. A plan that
+    simply omitted the question would read as a plan that had asked it and
+    found nothing — which is the failure this whole module exists to avoid.
+    """
+    interfaces = _interfaces_taken_down(commands)
+    if not interfaces:
+        return {
+            "blast_radius": None,
+            "blast_radius_note": (
+                "No command here shuts or removes an interface, so no link impact "
+                "was assessed. Other kinds of breakage are not covered by this."
+            ),
+        }
+
+    isolated: set[str] = set()
+    assessed: list[dict[str, Any]] = []
+    unknown: list[str] = []
+    stale = False
+
+    for name in interfaces:
+        result = topology.query_topology(
+            "blast_radius", node=device, interface=name,
+            reason=f"pre-change impact check: {reason}")
+        if "error" in result:
+            unknown.append(name)
+            continue
+        stale = stale or bool(result.get("stale"))
+        isolated.update(result.get("isolated") or [])
+        assessed.append({
+            "interface": name,
+            "isolated": result.get("isolated"),
+            "links_lost": [l["peer"] for l in result.get("links_lost", [])],
+            **({"partitions": result["partitions"]} if "partitions" in result else {}),
+        })
+
+    if not assessed:
+        return {
+            "blast_radius": None,
+            "blast_radius_note": (
+                f"This change takes {', '.join(interfaces)} out of service on "
+                f"{device}, but the topology graph has nothing recorded for "
+                f"{'that interface' if len(interfaces) == 1 else 'those interfaces'}. "
+                f"That is NOT a finding that nothing depends on them — it means "
+                f"the graph does not know. Run discover_topology, or check the "
+                f"device directly, before applying this."
+            ),
+        }
+
+    impact: dict[str, Any] = {
+        "blast_radius": {
+            "interfaces": interfaces,
+            "assessed": assessed,
+            "isolated": sorted(isolated),
+        },
+    }
+    if isolated:
+        impact["blast_radius_note"] = (
+            f"Applying this would cut off {', '.join(sorted(isolated))} from the "
+            f"rest of the network. Confirm that is intended before proceeding."
+        )
+    else:
+        impact["blast_radius_note"] = (
+            "No device loses reachability according to the graph, which only "
+            "covers links it has discovered."
+        )
+    if unknown:
+        impact["blast_radius"]["not_assessed"] = unknown
+        impact["blast_radius_note"] += (
+            f" No link is recorded on {', '.join(unknown)}, so nothing could be "
+            f"said about {'it' if len(unknown) == 1 else 'them'}."
+        )
+    if stale:
+        impact["blast_radius_note"] += (
+            " The graph is stale — re-run discover_topology before relying on this."
+        )
+    return impact
 
 
 def _writable(device: Device) -> Optional[str]:
@@ -207,6 +328,17 @@ def plan_change(device: str, commands: list[str], reason: str) -> dict[str, Any]
     cleaned = result.sanitized.splitlines()
     blocked_reason = _writable(target)
 
+    impact = _link_impact(target.name, cleaned, reason)
+    if (blocked_reason is None
+            and settings.REQUIRE_TOPOLOGY_FOR_WRITES
+            and impact["blast_radius"] is None
+            and _interfaces_taken_down(cleaned)):
+        blocked_reason = (
+            "NETNERD_REQUIRE_TOPOLOGY_FOR_WRITES is on and this change takes an "
+            "interface down with no topology data to say what depends on it. Run "
+            "discover_topology first."
+        )
+
     try:
         backup = _read_running_config(target, reason=f"pre-change backup: {reason}")
     except Exception as exc:
@@ -225,12 +357,14 @@ def plan_change(device: str, commands: list[str], reason: str) -> dict[str, Any]
         backup=backup,
         expires_at=datetime.now(tz=timezone.utc) + timedelta(minutes=settings.TOKEN_TTL_MIN),
         mechanism=mechanism,
+        blocked_reason=blocked_reason,
     )
     with _lock:
         _tokens[token.id] = token
 
     log.event("plan", device=target.name, token=token.id, commands=cleaned,
-              reason=reason, mechanism=mechanism)
+              reason=reason, mechanism=mechanism,
+              isolates=(impact["blast_radius"] or {}).get("isolated") or None)
 
     return {
         "device": target.name,
@@ -239,6 +373,7 @@ def plan_change(device: str, commands: list[str], reason: str) -> dict[str, Any]
         "expires_at": token.expires_at.isoformat(timespec="seconds"),
         "rollback": mechanism,
         "backup_lines": len(backup.splitlines()),
+        **impact,
         "applicable": blocked_reason is None,
         "note": blocked_reason or (
             f"Apply with apply_change('{token.id}'). The change reverts by itself "
@@ -268,11 +403,21 @@ def apply_change(token: str, reason: str) -> dict[str, Any]:
     if change.command_hash != _hash_commands(change.commands):
         return {"error": f"Token '{token}' does not match its commands — refusing."}
 
+    # The plan's own verdict, before anything else happens. The operator agreed
+    # to what the plan said; a plan marked not applicable that applies anyway
+    # is not a gate.
+    if change.blocked_reason:
+        audit.current().event("blocked", device=change.device, tool="apply_change",
+                              token=token, reason=reason, why=change.blocked_reason)
+        return {"error": change.blocked_reason, "device": change.device}
+
     try:
         target = _resolve(change.device)
     except InventoryError as exc:
         return {"error": str(exc)}
 
+    # Re-checked rather than taken from the token: read-only can be switched
+    # on after a token is issued.
     blocked = _writable(target)
     if blocked:
         audit.current().event("blocked", device=target.name, tool="apply_change",
@@ -281,22 +426,49 @@ def apply_change(token: str, reason: str) -> dict[str, Any]:
 
     log = audit.current()
     started = time.monotonic()
-    try:
-        with sessions.connection(target) as (driver, conn):
-            output = driver.send_config_set_validated(conn, change.commands)
-    except PermissionError as exc:
-        log.event("blocked", device=target.name, tool="apply_change", token=token,
-                  reason=reason, why=str(exc))
-        return {"error": str(exc), "device": target.name}
-    except Exception as exc:
-        log.event("error", device=target.name, tool="apply_change", token=token,
-                  reason=reason, error=f"{type(exc).__name__}: {exc}")
-        return {"error": f"Apply failed: {exc}", "device": target.name}
 
+    # Armed before the push, not after. A change that breaks the path to the
+    # device — shutting the interface the session runs over is the obvious one
+    # — kills the connection mid-command, and arming afterwards means that
+    # exact case, the one that most needs an automatic revert, never gets one.
     change.state = "applied"
     with _lock:
         _last_applied[target.name] = token
     _arm_rollback(change)
+
+    try:
+        with sessions.connection(target) as (driver, conn):
+            output = driver.send_config_set_validated(conn, change.commands)
+    except PermissionError as exc:
+        # The validator refused before anything reached the wire, so nothing
+        # landed and there is nothing to revert.
+        _cancel_rollback(change)
+        change.state = "pending"
+        with _lock:
+            _last_applied.pop(target.name, None)
+        log.event("blocked", device=target.name, tool="apply_change", token=token,
+                  reason=reason, why=str(exc))
+        return {"error": str(exc), "device": target.name}
+    except Exception as exc:
+        # The connection died part-way. Some commands may have landed, so the
+        # rollback timer stays armed rather than being cancelled on the
+        # assumption that nothing happened.
+        log.event("error", device=target.name, tool="apply_change", token=token,
+                  reason=reason, error=f"{type(exc).__name__}: {exc}",
+                  rollback_armed=True)
+        return {
+            "error": f"Apply failed part-way: {exc}",
+            "device": target.name,
+            "rollback_armed": True,
+            "note": (
+                f"The connection dropped during the push, so it is NOT known "
+                f"whether the commands landed. The rollback is armed and will "
+                f"restore the backup in {settings.CONFIRM_TIMEOUT_MIN} minutes "
+                f"unless confirm_change is called. If the change broke the path "
+                f"to {target.name}, the rollback will not reach it either — check "
+                f"the device out of band."
+            ),
+        }
 
     rejected = vendor.device_rejected(output)
     log.event("apply", device=target.name, token=token, commands=change.commands,
@@ -336,6 +508,13 @@ def _arm_rollback(change: ChangeToken) -> None:
     timer.daemon = True
     change.timer = timer
     timer.start()
+
+
+def _cancel_rollback(change: ChangeToken) -> None:
+    """Stop the countdown — only when it is certain nothing was applied."""
+    if change.timer is not None:
+        change.timer.cancel()
+        change.timer = None
 
 
 def _auto_rollback(token: str) -> None:

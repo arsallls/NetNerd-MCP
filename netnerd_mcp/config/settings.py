@@ -63,6 +63,15 @@ class Settings(BaseSettings):
         default=10,
         description="Minutes a device session may sit idle before its SSH connection is closed.",
     )
+    REQUIRE_TOPOLOGY_FOR_WRITES: bool = Field(
+        default=False,
+        description=(
+            "When True, a change that takes an interface down is refused unless "
+            "the topology graph can say what depends on it. Off by default: an "
+            "undiscovered network would otherwise be unchangeable. "
+            "Env: NETNERD_REQUIRE_TOPOLOGY_FOR_WRITES."
+        ),
+    )
     MAX_OUTPUT_LINES: int = Field(
         default=200,
         description=(
