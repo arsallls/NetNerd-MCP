@@ -3,8 +3,9 @@
 Runs as a local subprocess of the MCP client (stdio transport). Nothing is
 hosted; device credentials never leave the machine.
 
-Ten tools: four that read, five that change configuration through a token-gated
-plan/apply/confirm loop, and one that closes the session and writes the report.
+Twelve tools: six that read, five that change configuration through a
+token-gated plan/apply/confirm loop, and one that closes the session and
+writes the report.
 Safety is enforced here in server code, not in the client's prompt — the token
 gate, the read-only checks and the rollback timer all hold whether or not the
 agent follows instructions.
@@ -19,7 +20,7 @@ from typing import Any, Callable
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
-from netnerd_mcp import audit, changes, sessions
+from netnerd_mcp import audit, changes, sessions, topology
 from netnerd_mcp.config.settings import settings
 from netnerd_mcp.inventory import get_inventory
 from netnerd_mcp.tools import get_config, list_devices, show
@@ -48,6 +49,12 @@ address that is not in the inventory cannot be reached.
 Diagnosing: use `show` for commands and `get_config` for configuration. Read
 the device rather than inferring its state from its name or from memory; never
 invent interface names, VLAN IDs or addresses.
+
+Topology: discover_topology walks the devices once and stores how they connect;
+query_topology then answers neighbour, path and blast-radius questions from
+that graph instead of re-reading every device. Ask it what a change would cut
+off before applying anything that touches an interface. An empty graph means
+nothing has been discovered yet — never that nothing is connected.
 
 Changing configuration:
   1. plan_change  — validates the commands, backs the device up, returns a token
@@ -86,6 +93,8 @@ READ_TOOLS = [
     show,
     get_config,
     changes.plan_change,      # reads the device and issues a token; sends no config
+    topology.discover_topology,  # runs show commands only
+    topology.query_topology,
     sessions.get_transcript,
     sessions.end_session,
 ]
