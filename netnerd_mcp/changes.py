@@ -20,6 +20,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from netnerd_mcp import audit, sessions, topology, vendor
+from netnerd_mcp.drivers import transports
+from netnerd_mcp.drivers.base import (
+    CONFIRMED_COMMIT, DeviceRejected, TransportError)
 from netnerd_mcp.config.request_context import is_read_only
 from netnerd_mcp.config.settings import settings
 from netnerd_mcp.inventory import Device, InventoryError, get_inventory
@@ -196,6 +199,9 @@ def _writable(device: Device) -> Optional[str]:
 
 
 def _read_running_config(device: Device, reason: str) -> str:
+    transport = transports.for_device(device)
+    if transport.name != "ssh":
+        return transport.get_config(device)
     return sessions.run_command(
         device,
         vendor.running_config_command(device.device_type),
@@ -344,11 +350,18 @@ def plan_change(device: str, commands: list[str], reason: str) -> dict[str, Any]
     except Exception as exc:
         return {"error": f"Could not back up {target.name}: {exc}", "device": target.name}
 
-    mechanism = (
-        "native commit-confirmed"
-        if vendor.supports_native_commit_confirm(target.device_type)
-        else f"server-side rollback timer ({settings.CONFIRM_TIMEOUT_MIN} min)"
-    )
+    # A device that can revert itself is strictly safer than a timer on this
+    # side, which only works while this process is alive and can still reach
+    # the device — the two things a change most likely to need a rollback is
+    # most likely to have broken.
+    transport = transports.for_device(target)
+    if CONFIRMED_COMMIT in transport.capabilities():
+        mechanism = (f"{transport.name} confirmed-commit "
+                     f"({settings.CONFIRM_TIMEOUT_MIN} min, enforced by the device)")
+    elif vendor.supports_native_commit_confirm(target.device_type):
+        mechanism = "native commit-confirmed"
+    else:
+        mechanism = f"server-side rollback timer ({settings.CONFIRM_TIMEOUT_MIN} min)"
     token = ChangeToken(
         id="chg-" + secrets.token_hex(3),
         device=target.name,
@@ -437,18 +450,32 @@ def apply_change(token: str, reason: str) -> dict[str, Any]:
     _arm_rollback(change)
 
     try:
-        with sessions.connection(target) as (driver, conn):
-            output = driver.send_config_set_validated(conn, change.commands)
-    except PermissionError as exc:
-        # The validator refused before anything reached the wire, so nothing
-        # landed and there is nothing to revert.
+        transport = transports.for_device(target)
+        # The device's own timer where it has one; ours stays armed either
+        # way, and two rollbacks to the same backup are the same rollback.
+        output = transport.apply(
+            target, change.commands,
+            confirm_timeout_min=settings.CONFIRM_TIMEOUT_MIN,
+        )
+    except (PermissionError, DeviceRejected) as exc:
+        # Two different refusals with the same property: the outcome is known
+        # and nothing landed. The validator stopped it before the wire, or the
+        # device validated it and said no. Either way there is nothing to
+        # revert, and leaving a rollback armed would send an operator looking
+        # for damage that was never done.
         _cancel_rollback(change)
         change.state = "pending"
         with _lock:
             _last_applied.pop(target.name, None)
         log.event("blocked", device=target.name, tool="apply_change", token=token,
                   reason=reason, why=str(exc))
-        return {"error": str(exc), "device": target.name}
+        return {
+            "error": str(exc),
+            "device": target.name,
+            "applied": False,
+            "note": ("Nothing was applied and no rollback was needed. The token is "
+                     "still valid — fix the change and plan it again."),
+        }
     except Exception as exc:
         # The connection died part-way. Some commands may have landed, so the
         # rollback timer stays armed rather than being cancelled on the
@@ -546,19 +573,51 @@ def confirm_change(token: str, reason: str) -> dict[str, Any]:
     if change.state != "applied":
         return {"error": f"Token '{token}' is {change.state}, not applied — nothing to confirm."}
 
+    # A device running its own confirmed-commit timer has to be told, or it
+    # reverts regardless of what this process thinks. Do that before
+    # cancelling our timer: if the device refuses, our rollback is still armed
+    # and the change still comes back off, rather than being left applied with
+    # nothing watching it.
+    device_confirmation = None
+    try:
+        # Decided at plan time and carried on the token, rather than worked out
+        # again now. A change pushed over SSH is held by a timer in this
+        # process and the device knows nothing about it, so contacting the
+        # device to "confirm" would be pointless — and would make confirming
+        # fail whenever the device happened to be unreachable.
+        if CONFIRMED_COMMIT.replace("_", "-") in change.mechanism:
+            target = _resolve(change.device)
+            transport = transports.for_device(target, require=CONFIRMED_COMMIT)
+            device_confirmation = transport.confirm(target)
+    except (InventoryError, TransportError) as exc:
+        audit.current().event("error", device=change.device, tool="confirm_change",
+                              token=token, reason=reason,
+                              error=f"{type(exc).__name__}: {exc}")
+        return {
+            "error": f"Could not confirm on {change.device}: {exc}",
+            "device": change.device,
+            "token": token,
+            "confirmed": False,
+            "rollback_still_armed": True,
+        }
+
     if change.timer is not None:
         change.timer.cancel()
         change.timer = None
     change.state = "confirmed"
-    audit.current().event("confirm", device=change.device, token=token, reason=reason)
+    audit.current().event("confirm", device=change.device, token=token, reason=reason,
+                          mechanism=change.mechanism)
 
-    return {
+    result = {
         "device": change.device,
         "token": token,
         "confirmed": True,
         "note": "Change kept, rollback cancelled. It is not persistent yet — "
                 "call save_config to survive a reboot.",
     }
+    if device_confirmation:
+        result["device_confirmation"] = device_confirmation
+    return result
 
 
 def rollback(token: str, reason: str = "") -> dict[str, Any]:

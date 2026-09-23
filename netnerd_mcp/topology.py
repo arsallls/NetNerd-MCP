@@ -285,6 +285,16 @@ def discover_topology(reason: str, devices: Optional[list[str]] = None) -> dict[
     peer_hits: dict[str, dict[str, set[str]]] = {}
 
     for device in targets:
+        # Discovery is built on CLI show commands. Pointing them at a device
+        # that speaks only NETCONF would open an SSH session to a NETCONF
+        # server and wait for a prompt that never comes, so it is skipped and
+        # said out loud rather than appearing as a device with no neighbours.
+        if "ssh" not in (device.protocols or ("ssh",)):
+            failed[device.name] = (
+                f"speaks {'/'.join(device.protocols)}, not CLI over SSH — "
+                f"discovery reads neighbours with show commands")
+            continue
+
         command, output = _first_accepted(device, "interfaces", reason)
         if not command:
             failed[device.name] = "no interface command was accepted by this device"

@@ -76,12 +76,23 @@ class Device:
     enable_secret: str = ""
     key_file: str = ""
     writable: bool = False
+    # How to reach it, best first. Defaults to CLI over SSH, which is what
+    # brownfield gear has. A device listing "netconf" gets the device's own
+    # confirmed-commit instead of a server-side rollback timer.
+    protocols: tuple[str, ...] = ("ssh",)
+
+    @property
+    def config_language(self) -> str:
+        """What a change to this device has to be written in."""
+        primary = self.protocols[0] if self.protocols else "ssh"
+        return {"netconf": "xml", "restconf": "json"}.get(primary, "cli")
 
     def redacted(self) -> dict[str, Any]:
         """Safe to log — never includes the password."""
         return {"name": self.name, "host": self.host, "port": self.port,
                 "device_type": self.device_type, "username": self.username,
-                "writable": self.writable}
+                "writable": self.writable, "protocols": list(self.protocols),
+                "config_language": self.config_language}
 
 
 def _from_keyring(service: str, username: str) -> str:
@@ -212,6 +223,7 @@ class Inventory:
                 enable_secret=field("enable_secret"),
                 key_file=field("key_file"),
                 writable=bool(cfg.get("writable", False)),
+                protocols=tuple(cfg.get("protocols") or ["ssh"]),
             )
         logger.info("Loaded %d device(s) from %s", len(devices), path)
         return cls(devices, source=path)

@@ -32,3 +32,16 @@ devices:
     username: netshell
     password: netnerd123
     writable: false
+
+  # A real NETCONF server (make lab-full). Not a router — it exists so the
+  # NETCONF transport, and specifically RFC 6241 confirmed-commit, runs
+  # against a standards-compliant implementation instead of being taken on
+  # trust. Its config is IETF YANG data, so changes here are XML, not CLI.
+  netconf1:
+    host: localhost
+    port: 2230
+    device_type: netconf
+    protocols: [netconf]
+    username: netnerd
+    password: netnerd123
+    writable: true
