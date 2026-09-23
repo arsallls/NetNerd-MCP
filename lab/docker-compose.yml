@@ -37,6 +37,29 @@ services:
       labnet:
         ipv4_address: 172.30.0.3
 
+  # A real NETCONF server, so the NETCONF transport has something standards-
+  # compliant to run against. FRR speaks only an IOS-like CLI.
+  #
+  # Nokia SR Linux was the first choice — a real router with NETCONF and gNMI
+  # in one node — but it needs containerlab's network-namespace setup and its
+  # net_inst_mgr aborts under plain docker-compose, so NETCONF and gNMI never
+  # bind. netopeer2 is CESNET's reference implementation, which is arguably a
+  # better thing to test a client against: passing here means the transport is
+  # standards-compliant rather than compatible with one vendor's quirks.
+  #
+  # Behind the `full` profile because it builds from source (no published
+  # arm64 image) and `make lab` should stay fast. `make lab-full` brings it up.
+  netconf1:
+    build: ./netconf
+    container_name: netnerd-lab-netconf1
+    hostname: netconf1
+    profiles: ["full"]
+    ports:
+      - "2230:830"
+    networks:
+      labnet:
+        ipv4_address: 172.30.0.4
+
 networks:
   labnet:
     driver: bridge

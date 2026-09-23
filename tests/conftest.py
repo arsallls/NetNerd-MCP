@@ -40,6 +40,15 @@ requires_lab = pytest.mark.skipif(
     reason="FRR lab not running — start it with `make lab`",
 )
 
+# The NETCONF node lives behind the `full` compose profile because it builds
+# from source. Everything else keeps working without it.
+NETCONF_NODE = {"host": "localhost", "port": 2230}
+
+requires_netconf = pytest.mark.skipif(
+    not _port_open(NETCONF_NODE["host"], NETCONF_NODE["port"]),
+    reason="NETCONF node not running — start it with `make lab-full`",
+)
+
 
 @pytest.fixture(autouse=True)
 def close_pooled_connections():
