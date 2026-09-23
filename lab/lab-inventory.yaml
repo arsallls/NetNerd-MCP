@@ -20,3 +20,15 @@ devices:
     username: netnerd
     password: netnerd123
     writable: false   # left read-only so the allowlist gate is exercised
+
+  # r1's Linux side, reached with an ordinary shell instead of vtysh. FRR has
+  # no ntc-templates coverage, so this is the node that proves server-side
+  # parsing works over real SSH — `ip route show` and friends do have
+  # templates. Also the "Linux network node" the spec's lab section asks for.
+  r1-shell:
+    host: localhost
+    port: 2211
+    device_type: linux
+    username: netshell
+    password: netnerd123
+    writable: false

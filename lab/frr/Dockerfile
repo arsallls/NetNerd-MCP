@@ -10,6 +10,13 @@ RUN apk add --no-cache openssh-server shadow \
  && echo 'netnerd:netnerd123' | chpasswd \
  && adduser netnerd frrvty \
  && adduser netnerd frr \
+ # Same container, ordinary shell. Gives the lab a Linux node (spec section 5)
+ # and, more usefully, a device whose output ntc-templates actually has
+ # templates for — FRR has none, so this is the only way to prove the parsing
+ # path end to end over real SSH rather than in a unit test.
+ && adduser -D -s /bin/sh netshell \
+ && echo 'netshell:netnerd123' | chpasswd \
+ && apk add --no-cache iproute2 \
  && sed -i 's/^#*PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
