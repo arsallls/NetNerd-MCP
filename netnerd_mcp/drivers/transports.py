@@ -299,6 +299,18 @@ _BY_NAME = {
 }
 
 
+def _available(name: str) -> bool:
+    """Whether a transport's optional dependency is installed."""
+    factory = _BY_NAME.get(name)
+    if factory is None:
+        return False
+    try:
+        factory()
+    except TransportError:
+        return False
+    return True
+
+
 def _capabilities(session) -> set[str]:
     """Server capabilities, as bare names like ':candidate'."""
     found = set()
@@ -322,26 +334,39 @@ def _persist_id(device: Device) -> str:
 def for_device(device: Device, require: Optional[str] = None) -> Transport:
     """The transport to use for *device*.
 
-    Tries the inventory's `protocols` in order, skipping any whose package is
-    not installed, and falls back to SSH. With *require*, only a transport
-    advertising that capability is returned.
+    Tries the inventory's `protocols` in order and returns the first that is
+    usable. With *require*, only a transport advertising that capability is
+    returned.
+
+    There is no fallback to a protocol the inventory did not list. If a device
+    is declared NETCONF-only and ncclient is missing, quietly using SSH
+    instead would open a CLI session against port 830 and send configuration
+    commands into a NETCONF server — so this raises and says what to install.
     """
-    for name in (device.protocols or ["ssh"]):
+    listed = list(device.protocols or ["ssh"])
+    why_not: list[str] = []
+
+    for name in listed:
         factory = _BY_NAME.get(name)
         if factory is None:
             logger.warning("%s lists unknown protocol '%s' — ignoring", device.name, name)
+            why_not.append(f"{name}: not a protocol this server implements")
             continue
         try:
             transport = factory()
         except TransportError as exc:
             logger.info("%s: %s unavailable (%s)", device.name, name, exc)
+            why_not.append(f"{name}: {exc}")
             continue
         if require and require not in transport.capabilities():
+            why_not.append(f"{name}: does not provide '{require}'")
             continue
         return transport
 
     if require:
         raise TransportError(
             f"No transport for {device.name} provides '{require}'. Listed "
-            f"protocols: {device.protocols or ['ssh']}.")
-    return SSHTransport()
+            f"protocols: {listed}. " + "; ".join(why_not))
+    raise TransportError(
+        f"No usable transport for {device.name}. Listed protocols: {listed}. "
+        + "; ".join(why_not))

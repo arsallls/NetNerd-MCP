@@ -13,6 +13,16 @@ from netnerd_mcp.drivers.base import (
     CONFIRMED_COMMIT, INTERACTIVE, STRUCTURED, DeviceRejected, TransportError)
 from netnerd_mcp.inventory import Device
 
+# The protocol extras are optional by design, so a core install has none of
+# this. Tests that need a transport to actually construct are skipped rather
+# than installed around — CI runs the suite both ways.
+requires_ncclient = pytest.mark.skipif(
+    not transports._available("netconf"),
+    reason="ncclient not installed (pip install 'netnerd-mcp[netconf]')")
+requires_httpx = pytest.mark.skipif(
+    not transports._available("restconf"),
+    reason="httpx not installed (pip install 'netnerd-mcp[netconf]')")
+
 
 def _device(**overrides) -> Device:
     return Device(name=overrides.pop("name", "d1"),
@@ -24,10 +34,12 @@ class TestSelection:
         """Brownfield default: everything speaks CLI over SSH."""
         assert transports.for_device(_device()).name == "ssh"
 
+    @requires_ncclient
     def test_a_netconf_device_gets_netconf(self):
         assert transports.for_device(
             _device(protocols=("netconf",))).name == "netconf"
 
+    @requires_ncclient
     def test_the_first_listed_protocol_wins(self):
         assert transports.for_device(
             _device(protocols=("netconf", "ssh"))).name == "netconf"
@@ -38,6 +50,7 @@ class TestSelection:
         assert transports.for_device(
             _device(protocols=("carrier-pigeon", "ssh"))).name == "ssh"
 
+    @requires_ncclient
     def test_requiring_confirmed_commit_skips_ssh(self):
         transport = transports.for_device(
             _device(protocols=("ssh", "netconf")), require=CONFIRMED_COMMIT)
@@ -48,6 +61,41 @@ class TestSelection:
             transports.for_device(_device(protocols=("ssh",)), require=CONFIRMED_COMMIT)
 
 
+class TestNoSilentDowngrade:
+    """A device declared NETCONF-only must never be reached over CLI.
+
+    Falling back to SSH would open a netmiko session against port 830 and push
+    configuration commands into a NETCONF server. CI caught this: it installs
+    without the protocol extras, and selection quietly returned SSH for a
+    netconf-only device.
+    """
+
+    def test_an_unusable_listed_protocol_raises_rather_than_falling_back(self, monkeypatch):
+        monkeypatch.setattr(transports, "_BY_NAME", {"ssh": transports.SSHTransport})
+
+        with pytest.raises(TransportError) as raised:
+            transports.for_device(_device(protocols=("netconf",)))
+
+        assert "No usable transport" in str(raised.value)
+        assert "netconf" in str(raised.value)
+
+    def test_the_error_says_what_is_missing(self):
+        """A missing optional dependency should read as an install hint, not
+        as a device problem."""
+        if transports._available("netconf"):
+            pytest.skip("ncclient is installed, so there is nothing missing")
+
+        with pytest.raises(TransportError, match=r"netnerd-mcp\[netconf\]"):
+            transports.for_device(_device(protocols=("netconf",)))
+
+    def test_a_device_listing_ssh_as_a_fallback_still_gets_it(self, monkeypatch):
+        monkeypatch.setattr(transports, "_BY_NAME", {"ssh": transports.SSHTransport})
+
+        assert transports.for_device(
+            _device(protocols=("netconf", "ssh"))).name == "ssh"
+
+
+@requires_ncclient
 class TestCapabilities:
     def test_only_netconf_claims_the_device_can_revert_itself(self):
         """This drives which rollback mechanism a change gets, so a wrong
@@ -79,6 +127,7 @@ class TestConfigLanguage:
         assert "password" not in redacted
 
 
+@requires_ncclient
 class TestWrongLanguageIsRefusedBeforeSending:
     """CLI lines sent to a NETCONF device would be a malformed RPC. Catching
     it here gives the caller a usable message instead of a parser error."""
@@ -93,6 +142,7 @@ class TestWrongLanguageIsRefusedBeforeSending:
             transports.NetconfTransport().apply(
                 _device(protocols=("netconf",)), ["interface lo"])
 
+    @requires_httpx
     def test_cli_lines_to_a_restconf_device_are_refused(self):
         with pytest.raises(TransportError, match="JSON"):
             transports.RestconfTransport().apply(
@@ -108,6 +158,7 @@ class TestUnsupportedOperations:
         with pytest.raises(TransportError, match="server-side timer"):
             transports.SSHTransport().confirm(_device())
 
+    @requires_httpx
     def test_restconf_has_no_startup_datastore(self):
         """RFC 8040 has only running. Saying that beats returning the running
         config under a label claiming it is the startup one."""
