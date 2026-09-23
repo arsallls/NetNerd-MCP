@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Per-session SSH connection pool
 # ---------------------------------------------------------------------------
-# Keyed by "session_id:device_ip" → active BaseConnection.
+# Keyed by "session_id:device" → active BaseConnection.
 # Connections are reused across tool calls within the same agent turn/session
 # instead of reconnecting for every command, dramatically cutting latency.
 
@@ -48,8 +48,24 @@ def _get_session_id() -> Optional[str]:
         return None
 
 
-def _pool_key(session_id: str, device_ip: str) -> str:
-    return f"{session_id}:{device_ip}"
+def _pool_key(session_id: str, device_ip: str, port: Optional[int] = None) -> str:
+    """Identify a pooled connection by the inventory entry, not the address.
+
+    Two entries can name the same host with different credentials, ports or
+    device types — a read-only account and an enable account on one switch is
+    an ordinary setup, and the lab reaches one container through both vtysh and
+    a shell. Keying on the address alone made the second entry silently reuse
+    the first's session, so commands ran as the wrong user against the wrong
+    CLI. The inventory name is unique by construction and maps one-to-one to a
+    credential set; the address is only a fallback for direct driver use with
+    no inventory behind it.
+    """
+    try:
+        from netnerd_mcp.config.request_context import get_request_device_name
+        name = get_request_device_name()
+    except Exception:
+        name = None
+    return f"{session_id}:{name or f'{device_ip}:{port or 22}'}"
 
 
 def _connection_alive(conn: BaseConnection) -> bool:
@@ -411,7 +427,7 @@ class SSHDriver:
         """
         session_id = _get_session_id()
         use_pool = bool(session_id)
-        key = _pool_key(session_id, device_ip) if use_pool else None
+        key = _pool_key(session_id, device_ip, port) if use_pool else None
 
         if use_pool:
             with _pool_lock:

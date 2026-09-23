@@ -88,3 +88,55 @@ class TestRealConfigWrite:
             rolled_back = driver.run_command(conn, "show running-config")
 
         assert marker not in rolled_back, "rollback failed — lab left dirty"
+
+
+class TestConnectionPoolIdentity:
+    """Two inventory entries can name the same host.
+
+    A read-only account beside an enable account on one switch is an ordinary
+    setup, and the lab reaches one container as both a router (vtysh) and a
+    Linux shell. The pool used to key on the address alone, so the second entry
+    silently reused the first's session — running commands as the wrong user
+    against the wrong CLI, and reporting the result as that device's own.
+    Discovery surfaced it: the shell entry came back as "no interface command
+    was accepted", because its commands were going to vtysh.
+    """
+
+    def test_two_entries_on_one_host_get_their_own_sessions(self):
+        from netnerd_mcp import audit, sessions
+        from netnerd_mcp.inventory import Inventory
+        from pathlib import Path
+
+        inventory = Inventory.load(
+            Path(__file__).resolve().parents[2] / "lab" / "lab-inventory.yaml")
+        router = inventory.resolve("r1")           # localhost:2211, vtysh
+        shell = inventory.resolve("r1-shell")      # localhost:2211, /bin/sh
+
+        assert (router.host, router.port) == (shell.host, shell.port), \
+            "this test is meaningless unless both entries share a host and port"
+
+        audit.reset()
+        try:
+            # Router first, so the shell entry is the one at risk of inheriting it.
+            routed = sessions.run_command(
+                router, "show ip bgp summary", reason="pool identity check", tool="show")
+            shelled = sessions.run_command(
+                shell, "ip address show", reason="pool identity check", tool="show")
+        finally:
+            sessions.close_all(reason="pool identity check finished")
+            audit.reset()
+
+        assert "65002" in routed, "the router entry did not reach vtysh"
+        assert "inet " in shelled, \
+            f"the shell entry was answered by the router's session instead:\n{shelled}"
+
+    def test_the_pool_key_is_the_inventory_name_not_the_address(self):
+        from netnerd_mcp.config.request_context import set_request_context
+        from netnerd_mcp.drivers.ssh_driver import _pool_key
+
+        set_request_context(device_name="r1")
+        as_router = _pool_key("sess", "localhost", 2211)
+        set_request_context(device_name="r1-shell")
+        as_shell = _pool_key("sess", "localhost", 2211)
+
+        assert as_router != as_shell
