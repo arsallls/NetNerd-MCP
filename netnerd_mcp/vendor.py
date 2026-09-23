@@ -47,6 +47,56 @@ def supports_native_commit_confirm(device_type: str) -> bool:
     return device_type in _NATIVE_COMMIT_CONFIRM
 
 
+# Topology discovery. Candidates are tried in order until one is not rejected,
+# rather than picked from device_type alone: the lab's FRR routers are typed
+# cisco_ios because that is the netmiko driver that speaks vtysh, so the type
+# cannot tell real IOS from FRR. A rejected first attempt costs one round trip
+# and lands in the audit log, which is what a human would do anyway.
+#
+# Interface commands are ordered to prefer output carrying a prefix length.
+# Without a mask, an interface is still recorded but cannot be used to infer
+# which devices share a subnet.
+_DISCOVERY = {
+    "cisco_ios": {
+        "interfaces": ["show interface brief", "show ip interface brief"],
+        "lldp": ["show lldp neighbors detail", "show cdp neighbors detail"],
+        "bgp": ["show ip bgp summary"],
+        "ospf": ["show ip ospf neighbor"],
+    },
+    "arista_eos": {
+        "interfaces": ["show ip interface brief"],
+        "lldp": ["show lldp neighbors detail"],
+        "bgp": ["show ip bgp summary"],
+        "ospf": ["show ip ospf neighbor"],
+    },
+    "juniper_junos": {
+        "interfaces": ["show interfaces terse"],
+        "lldp": ["show lldp neighbors"],
+        "bgp": ["show bgp summary"],
+        "ospf": ["show ospf neighbor"],
+    },
+    "linux": {
+        "interfaces": ["ip address show"],
+        "lldp": ["lldpctl"],
+        "bgp": [],
+        "ospf": [],
+    },
+}
+_DISCOVERY["cisco_xe"] = _DISCOVERY["cisco_ios"]
+_DISCOVERY["cisco_nxos"] = _DISCOVERY["cisco_ios"]
+_DISCOVERY["juniper"] = _DISCOVERY["juniper_junos"]
+
+
+def discovery_commands(device_type: str, kind: str) -> list[str]:
+    """Candidate commands for one discovery source, best first.
+
+    An unknown platform falls back to the IOS-style set — those commands are
+    the most widely imitated, and a rejection is detected rather than guessed.
+    """
+    table = _DISCOVERY.get(device_type, _DISCOVERY["cisco_ios"])
+    return table.get(kind, [])
+
+
 # A device that refuses a command says so in the output and returns normally —
 # netmiko raises nothing. Matching is on specific failure phrasing, not on a
 # leading "%": FRR prints "% Can't open configuration file /etc/frr/vtysh.conf"
