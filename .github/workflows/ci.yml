@@ -36,7 +36,8 @@ jobs:
         run: |
           docker compose -f lab/docker-compose.yml up -d --build
           for i in $(seq 1 60); do
-            nc -z localhost 2211 && nc -z localhost 2212 && exit 0
+            nc -z localhost 2211 && nc -z localhost 2212 \
+              && nc -z localhost 2213 && nc -z localhost 2214 && exit 0
             sleep 1
           done
           echo "lab failed to start"; docker compose -f lab/docker-compose.yml logs; exit 1

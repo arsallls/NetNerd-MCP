@@ -2,9 +2,11 @@
 
 lab:  ## Build and start the FRR integration lab
 	docker compose -f lab/docker-compose.yml up -d --build
-	@echo "Waiting for SSH on r1/r2..."
-	@for i in $$(seq 1 30); do \
-		nc -z localhost 2211 2>/dev/null && nc -z localhost 2212 2>/dev/null && echo "lab up: r1=localhost:2211 r2=localhost:2212 (netnerd/netnerd123)" && exit 0; \
+	@echo "Waiting for SSH on r1-r4..."
+	@for i in $$(seq 1 45); do \
+		nc -z localhost 2211 2>/dev/null && nc -z localhost 2212 2>/dev/null \
+			&& nc -z localhost 2213 2>/dev/null && nc -z localhost 2214 2>/dev/null \
+			&& echo "lab up: r1=2211 r2=2212 r3=2213 r4=2214 (netnerd/netnerd123)" && exit 0; \
 		sleep 1; \
 	done; \
 	echo "SSH did not come up in 30s — check 'make lab-logs'"; exit 1
@@ -14,8 +16,9 @@ lab-full:  ## Start the lab plus the NETCONF node (builds netopeer2 from source)
 	@echo "Waiting for SSH on r1/r2 NETCONF on netconf1 and gNMI on gnmi1..."
 	@for i in $$(seq 1 90); do \
 		nc -z localhost 2211 2>/dev/null && nc -z localhost 2212 2>/dev/null \
+			&& nc -z localhost 2213 2>/dev/null && nc -z localhost 2214 2>/dev/null \
 			&& nc -z localhost 2230 2>/dev/null && nc -z localhost 57400 2>/dev/null \
-			&& echo "lab up: r1=2211 r2=2212 netconf1=2230 gnmi1=57400 (netnerd/netnerd123)" && exit 0; \
+			&& echo "lab up: r1-r4, netconf1=2230, gnmi1=57400 (netnerd/netnerd123)" && exit 0; \
 		sleep 1; \
 	done; \
 	echo "lab did not come up in 90s — check 'make lab-logs'"; exit 1

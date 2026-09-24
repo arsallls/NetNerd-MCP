@@ -49,6 +49,15 @@ requires_netconf = pytest.mark.skipif(
     reason="NETCONF node not running — start it with `make lab-full`",
 )
 
+# The two extra routers a staged rollout needs. They are in the default
+# `make lab`, but a lab started before they existed will not have them.
+FLEET_NODES = {"r3": 2213, "r4": 2214}
+
+requires_fleet = pytest.mark.skipif(
+    not all(_port_open("localhost", p) for p in FLEET_NODES.values()),
+    reason="r3/r4 not running — recreate the lab with `make lab`",
+)
+
 GNMI_NODE = {"host": "localhost", "port": 57400}
 
 requires_gnmi = pytest.mark.skipif(
