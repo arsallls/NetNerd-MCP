@@ -54,7 +54,7 @@ def _running_config() -> str:
 class TestPlanApplyConfirm:
     def test_the_happy_path_lands_and_stays(self):
         plan = changes.plan_change(
-            "r1", ["interface lo", f"description {MARKER}"],
+            device="r1", commands=["interface lo", f"description {MARKER}"],
             reason="tagging the loopback so the change loop can be verified",
         )
         assert plan["applicable"] is True, plan
@@ -77,7 +77,7 @@ class TestPlanApplyConfirm:
         monkeypatch.setattr(settings, "CONFIRM_TIMEOUT_MIN", 3 / 60)
 
         plan = changes.plan_change(
-            "r1", ["interface lo", f"description {MARKER}"],
+            device="r1", commands=["interface lo", f"description {MARKER}"],
             reason="simulating an agent that applies a change and then loses the session",
         )
         changes.apply_change(plan["token"], reason="applying without confirming")
@@ -90,7 +90,7 @@ class TestPlanApplyConfirm:
 
     def test_rollback_reports_whether_the_device_matches_its_backup(self):
         plan = changes.plan_change(
-            "r1", ["interface lo", f"description {MARKER}"],
+            device="r1", commands=["interface lo", f"description {MARKER}"],
             reason="checking rollback verification",
         )
         changes.apply_change(plan["token"], reason="apply then undo")
@@ -113,7 +113,7 @@ class TestPlanApplyConfirm:
                 conn, ["interface lo", "description original-value"])
 
         plan = changes.plan_change(
-            "r1", ["interface lo", f"description {MARKER}"],
+            device="r1", commands=["interface lo", f"description {MARKER}"],
             reason="overwriting a description that already has a value",
         )
         changes.apply_change(plan["token"], reason="apply over the existing value")
@@ -129,7 +129,7 @@ class TestPlanApplyConfirm:
 class TestGates:
     def test_a_non_writable_device_is_refused(self):
         plan = changes.plan_change(
-            "r2", ["interface lo", "description nope"],
+            device="r2", commands=["interface lo", "description nope"],
             reason="r2 is marked writable: false in the inventory",
         )
         assert plan["applicable"] is False
@@ -140,7 +140,7 @@ class TestGates:
 
     def test_read_only_mode_blocks_apply_even_with_a_valid_token(self, monkeypatch):
         plan = changes.plan_change(
-            "r1", ["interface lo", f"description {MARKER}"],
+            device="r1", commands=["interface lo", f"description {MARKER}"],
             reason="token issued while writes were allowed",
         )
         monkeypatch.setattr(settings, "READ_ONLY", True)
@@ -158,7 +158,7 @@ class TestGates:
         save_config reported success anyway. The refusal path is covered by the
         verbatim device output in tests/unit/test_changes.py."""
         plan = changes.plan_change(
-            "r1", ["interface lo", f"description {MARKER}"],
+            device="r1", commands=["interface lo", f"description {MARKER}"],
             reason="checking a confirmed change can be persisted",
         )
         changes.apply_change(plan["token"], reason="applying before save")
@@ -179,7 +179,7 @@ class TestGates:
 
     def test_save_config_refuses_an_unconfirmed_change(self):
         plan = changes.plan_change(
-            "r1", ["interface lo", f"description {MARKER}"],
+            device="r1", commands=["interface lo", f"description {MARKER}"],
             reason="checking save is gated on confirmation",
         )
         changes.apply_change(plan["token"], reason="apply without confirming")
@@ -217,7 +217,7 @@ class TestAuditTrail:
         from netnerd_mcp.audit import verify
 
         plan = changes.plan_change(
-            "r1", ["interface lo", f"description {MARKER}"],
+            device="r1", commands=["interface lo", f"description {MARKER}"],
             reason="auditing the change loop end to end",
         )
         changes.apply_change(plan["token"], reason="operator approved")
@@ -255,7 +255,7 @@ class TestBlastRadiusInThePlan:
 
     def test_shutting_the_transit_link_warns_that_r2_is_cut_off(self, mapped):
         plan = changes.plan_change(
-            "r1", ["interface eth0", "shutdown"],
+            device="r1", commands=["interface eth0", "shutdown"],
             reason="checking the plan reports what this would isolate")
 
         assert plan["blast_radius"] is not None, plan
@@ -267,7 +267,7 @@ class TestBlastRadiusInThePlan:
         """plan_change must not touch the device — the operator gets the
         warning while the interface is still up."""
         plan = changes.plan_change(
-            "r1", ["interface eth0", "shutdown"], reason="checking nothing is pushed")
+            device="r1", commands=["interface eth0", "shutdown"], reason="checking nothing is pushed")
 
         assert plan["blast_radius"]["isolated"] == ["r2"]
         assert changes._tokens[plan["token"]].state == "pending"
@@ -281,7 +281,7 @@ class TestBlastRadiusInThePlan:
 
     def test_a_harmless_change_is_not_dressed_up_as_dangerous(self, mapped):
         plan = changes.plan_change(
-            "r1", ["interface lo", f"description {MARKER}"],
+            device="r1", commands=["interface lo", f"description {MARKER}"],
             reason="a description change takes no link down")
 
         assert plan["blast_radius"] is None
@@ -289,7 +289,7 @@ class TestBlastRadiusInThePlan:
 
     def test_what_isolates_a_device_is_recorded_in_the_audit_trail(self, mapped):
         changes.plan_change(
-            "r1", ["interface eth0", "shutdown"], reason="auditing the impact finding")
+            device="r1", commands=["interface eth0", "shutdown"], reason="auditing the impact finding")
 
         plans = [e for e in audit.current().events() if e["event"] == "plan"]
         assert plans[-1]["isolates"] == ["r2"]
@@ -301,7 +301,7 @@ class TestBlastRadiusInThePlan:
         topology.reset()
 
         plan = changes.plan_change(
-            "r1", ["interface eth0", "shutdown"], reason="planning with no graph")
+            device="r1", commands=["interface eth0", "shutdown"], reason="planning with no graph")
 
         assert plan["blast_radius"] is None
         assert "NOT a finding" in plan["blast_radius_note"]
@@ -315,7 +315,7 @@ class TestBlastRadiusInThePlan:
         topology.reset()
 
         plan = changes.plan_change(
-            "r1", ["interface eth0", "shutdown"], reason="gate is on, graph is empty")
+            device="r1", commands=["interface eth0", "shutdown"], reason="gate is on, graph is empty")
 
         assert plan["applicable"] is False
         assert "discover_topology" in plan["note"]

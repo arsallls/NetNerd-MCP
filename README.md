@@ -83,6 +83,37 @@ A missing secret is an error, never an empty password.
 `device_type` is any [netmiko platform](https://github.com/ktbyers/netmiko/blob/develop/PLATFORMS.md).
 `protocols` defaults to `[ssh]`; see [Protocols](#protocols).
 
+### Importing what you already have
+
+Nobody hand-types five hundred devices, and they are already listed somewhere:
+
+```bash
+netnerd-mcp import --from-ansible ~/net/hosts.yml     # YAML or INI
+netnerd-mcp import --from-ssh-config                  # ~/.ssh/config
+```
+
+It prints the result and changes nothing until you add `--write`, which merges
+into your inventory and keeps a `.bak`. `ansible_network_os` maps to the
+netmiko platform, group vars are inherited, and anything it could not
+recognise is defaulted to `cisco_ios` **and named in the output** so you can
+check it.
+
+Two things it will not do:
+
+- **It never copies a password.** An inline `ansible_password` is counted and
+  left behind; what gets written is `${NET_PASS}`, or `keyring:` references
+  with `--keyring`.
+- **It never overwrites a device you already have.** An entry you marked
+  writable or pointed at a jump host stays exactly as you left it.
+
+Everything imported is `writable: false`. Grant writes per device, by hand —
+a bulk import that produced five hundred writable devices would be the widest
+blast radius in the tool.
+
+Importing is a shell command rather than a tool the model can call, because
+the inventory is the allowlist: letting the model add entries would let it
+widen its own reach.
+
 Looked up in order: `$NETNERD_INVENTORY`, `./inventory.yaml`,
 `~/.netnerd/inventory.yaml`.
 
@@ -99,15 +130,17 @@ it writes the commands and the server decides whether they're allowed to run.
 | `discover_topology` | read | Walks the devices and records how they connect. |
 | `query_topology` | read | Neighbours, paths, and what a change would cut off. |
 | `telemetry` | read | Watches counters for a few seconds and reports what they did. |
-| `plan_change` | read | Validates commands, backs up the device, returns a change token. |
-| `apply_change` | write | Pushes a planned change by token, and arms the rollback. |
+| `plan_change` | read | Validates commands, backs up the device, returns a change token. Takes `devices` for a staged fleet rollout. |
+| `apply_change` | write | Pushes a planned change by token, and arms the rollback. One stage at a time for a fleet. |
 | `confirm_change` | write | Keeps the change. Without this it reverts. |
 | `rollback` | write | Undoes it now, and says whether the device matches its backup. |
 | `save_config` | write | Persists — refused until the change is confirmed. |
 | `get_transcript` | read | This session's audit trail so far. |
 | `end_session` | read | Closes the sessions, writes the report. |
 
-Every tool takes a `reason`, which lands in the audit log.
+Every tool that touches a device takes a `reason`, which lands in the audit
+log. The three that read only local state — `list_devices`, `get_transcript`
+and `end_session` — do not.
 
 ## Protocols
 
@@ -167,6 +200,46 @@ Output nothing can parse comes back raw, capped at `NETNERD_MAX_OUTPUT_LINES`
 (200). Past that it is returned as `output_excerpt`, never `output` — a partial
 result doesn't get to be shaped like a whole one.
 
+## Fleet rollout
+
+Pass `devices` instead of `device` and the change is staged: one device, then
+a tenth, then the rest — Ansible's `serial:` shape, because that is the
+vocabulary this audience already has.
+
+```
+plan_change(devices=[...500 switches...])  → 3 stages, aggregate blast radius
+apply_change(token)                        → stage 1 of 3: 1 device, healthy
+apply_change(token)                        → stage 2 of 3: 50 devices, healthy
+apply_change(token)                        → stage 3 of 3: 449 devices, healthy
+confirm_change(token)                      → rollbacks cancelled fleet-wide
+```
+
+Each call applies **one stage and returns**, so no call holds the session open
+for twenty minutes, and every stage is health-checked before the next one
+starts. Each device keeps its own backup and its own rollback mechanism, so a
+fleet spanning SSH and NETCONF gear uses the stronger one where it exists.
+
+Three outcomes after a stage:
+
+| What the check finds | What happens |
+|---|---|
+| Device unreachable, change absent, or refused | **every stage applied so far is rolled back** |
+| A routing adjacency dropped | **halt and report** — the operator decides |
+| Healthy | advance to the next stage |
+
+A lost peer halts rather than reverting because it is a weaker signal than a
+device that will not answer — it may have been flapping already. While halted
+every device is still armed, so walking away reverts the fleet rather than
+leaving it half-applied.
+
+Results come back as counts, naming only the devices that went wrong; 500
+per-device results do not fit in a context window. A rollback that cannot
+reach a device reports it under `still_changed` rather than counting it
+restored.
+
+This is the part Ansible cannot do at any fork count. `serial:` batches a
+rollout; nothing rolls it back.
+
 ## Safety
 
 Read-only mode is **on by default**. Turn it off deliberately:
@@ -222,10 +295,11 @@ Set `NETNERD_AUDIT_DIR` to put it somewhere else.
 
 ## Development
 
-An FRR lab with an established eBGP session, reachable over real SSH:
+An FRR lab with an established eBGP session, plus two more routers for
+staged rollouts — all reachable over real SSH:
 
 ```bash
-make lab              # two FRR routers, ~30s
+make lab              # four FRR routers, ~30s
 make test-unit        # safety gates, audit chain, token logic — no lab needed
 make test-integration # drives the lab over real SSH, including the rollback timer
 make lab-down
@@ -255,6 +329,7 @@ Alpha. What has been run, and against what:
 | NETCONF | netopeer2, in CI | including confirmed-commit the device enforces itself |
 | Topology discovery | FRR, in CI | via shared subnet and BGP/OSPF adjacency |
 | gNMI | gnxi target, in CI | Get and bounded telemetry |
+| Staged fleet rollout | 3 FRR routers, in CI | including a mid-rollout failure reverting the fleet |
 | RESTCONF | not yet | written to RFC 8040 |
 | Cisco IOS / IOS-XE | not yet | written against it, needs hardware |
 | Arista EOS, NX-OS, VyOS | not yet | netmiko supports them; command strings untested |
@@ -267,8 +342,8 @@ them. Two things worth knowing before you lean on them:
 - **gNMI telemetry has not seen a counter move.** The sampling and summarising
   are proven; a moving counter hasn't been observed.
 
-Single operator, one device at a time. Staged fleet rollout, jump hosts,
-streamable-HTTP transport and per-engineer auth are next.
+Single operator, one network. Jump hosts, streamable-HTTP transport and
+per-engineer auth are next.
 
 Issues and PRs welcome.
 

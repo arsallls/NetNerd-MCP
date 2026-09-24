@@ -89,8 +89,14 @@ def _db() -> sqlite3.Connection:
     with _lock:
         if _conn is None:
             path = Path(settings.STATE_DIR).expanduser() / "topology.db"
-            path.parent.mkdir(parents=True, exist_ok=True)
+            # The graph is a map of the network — every device, address and
+            # adjacency that was discovered. Owner-only, like the audit trail.
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             _conn = sqlite3.connect(path, check_same_thread=False)
+            try:
+                path.chmod(0o600)
+            except OSError:
+                pass
             _conn.row_factory = sqlite3.Row
             _conn.executescript(_SCHEMA)
             _conn.commit()
@@ -719,12 +725,20 @@ def _blast_radius(graph, node: str, interface: str, ages: list) -> dict[str, Any
         working.remove_node(node)
         removed = [{"peer": p, **_edge_view(graph, node, p)} for p in graph.neighbors(node)]
 
-    # What is left over, measured against the largest surviving island rather
+    # Scoped to the part of the network this change can actually affect: the
+    # component the device sits in today. A graph holding two separate sites
+    # has islands that never reached this device, and measuring against the
+    # whole graph lets an unrelated segment count as "the network" — which
+    # reports the changed device itself as the stranded one.
+    scope = nx.node_connected_component(graph, node)
+
+    # Within that scope, measured against the largest surviving island rather
     # than from the changed device's own point of view — cutting an uplink
     # separates two groups, and which of them counts as "cut off" is a fact
     # about the network, not about which end the command was typed on.
-    islands = sorted((sorted(c) for c in nx.connected_components(working)),
-                     key=lambda c: (-len(c), c[0] if c else ""))
+    islands = sorted(
+        (sorted(c) for c in nx.connected_components(working.subgraph(scope))),
+        key=lambda c: (-len(c), c[0] if c else ""))
     isolated = sorted(n for island in islands[1:] for n in island)
 
     result: dict[str, Any] = {

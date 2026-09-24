@@ -51,6 +51,14 @@ class ChangeToken:
     # operator — a plan marked not applicable that applies anyway is not a
     # gate, and the operator agreed to what the plan said.
     blocked_reason: Optional[str] = None
+    # 0 means "use the global setting". Carried per token because a fleet
+    # rollout needs a window that outlasts the whole rollout, while a
+    # single-device change keeps the short one.
+    confirm_timeout_min: int = 0
+
+    @property
+    def timeout_min(self) -> int:
+        return self.confirm_timeout_min or settings.CONFIRM_TIMEOUT_MIN
 
     def expired(self) -> bool:
         return datetime.now(tz=timezone.utc) > self.expires_at
@@ -306,19 +314,37 @@ def _diff(before: str, after: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def plan_change(device: str, commands: list[str], reason: str) -> dict[str, Any]:
-    """Validate a configuration change, back up the device, and issue a token.
+def plan_change(commands: list[str], reason: str, device: str = "",
+                devices: Optional[list[str]] = None) -> dict[str, Any]:
+    """Validate a configuration change, back up the device(s), and issue a token.
 
     Nothing is sent to the device except the reads needed to take the backup.
     The returned token is the only way to apply this exact command list, and it
     expires. Show the operator the commands before applying them.
 
+    Give either `device` for one device, or `devices` for a staged rollout
+    across several. A fleet is applied one stage at a time — one device, then
+    a tenth, then the rest — and each stage is health-checked before the next.
+    If a stage fails, every stage applied so far is rolled back. The token
+    works the same either way: apply_change, then confirm_change or rollback.
+
     Parameters
     ----------
     device: inventory name of the target device.
+    devices: inventory names, for a staged rollout across a fleet.
     commands: configuration commands, without 'configure terminal' or 'end'.
     reason: why this change is being made — recorded in the audit log.
     """
+    if not commands:
+        return {"error": "No commands given — nothing to plan."}
+    if devices and device:
+        return {"error": "Give 'device' or 'devices', not both."}
+    if devices:
+        from netnerd_mcp import fleet
+        return fleet.plan_fleet(devices, commands, reason)
+    if not device:
+        return {"error": "Give 'device' (one) or 'devices' (a staged rollout)."}
+
     try:
         target = _resolve(device)
     except InventoryError as exc:
@@ -403,6 +429,10 @@ def apply_change(token: str, reason: str) -> dict[str, Any]:
     this returns, verify the device with `show` and then call confirm_change —
     an unconfirmed change reverts on its own.
     """
+    if token.startswith("fleet-"):
+        from netnerd_mcp import fleet
+        return fleet.advance(token, reason)
+
     with _lock:
         change = _tokens.get(token)
     if change is None:
@@ -455,7 +485,7 @@ def apply_change(token: str, reason: str) -> dict[str, Any]:
         # way, and two rollbacks to the same backup are the same rollback.
         output = transport.apply(
             target, change.commands,
-            confirm_timeout_min=settings.CONFIRM_TIMEOUT_MIN,
+            confirm_timeout_min=change.timeout_min,
         )
     except (PermissionError, DeviceRejected) as exc:
         # Two different refusals with the same property: the outcome is known
@@ -490,7 +520,7 @@ def apply_change(token: str, reason: str) -> dict[str, Any]:
             "note": (
                 f"The connection dropped during the push, so it is NOT known "
                 f"whether the commands landed. The rollback is armed and will "
-                f"restore the backup in {settings.CONFIRM_TIMEOUT_MIN} minutes "
+                f"restore the backup in {change.timeout_min} minutes "
                 f"unless confirm_change is called. If the change broke the path "
                 f"to {target.name}, the rollback will not reach it either — check "
                 f"the device out of band."
@@ -508,10 +538,10 @@ def apply_change(token: str, reason: str) -> dict[str, Any]:
         "applied": True,
         "output": audit.mask(output),
         "rollback": change.mechanism,
-        "confirm_within_min": settings.CONFIRM_TIMEOUT_MIN,
+        "confirm_within_min": change.timeout_min,
         "next": (
             f"Verify the device with `show`, then call confirm_change('{token}'). "
-            f"If you do nothing, the change reverts in {settings.CONFIRM_TIMEOUT_MIN} minutes."
+            f"If you do nothing, the change reverts in {change.timeout_min} minutes."
         ),
     }
     if rejected:
@@ -530,7 +560,7 @@ def apply_change(token: str, reason: str) -> dict[str, Any]:
 def _arm_rollback(change: ChangeToken) -> None:
     """Start the countdown that reverts an unconfirmed change."""
     timer = threading.Timer(
-        settings.CONFIRM_TIMEOUT_MIN * 60, _auto_rollback, args=(change.id,)
+        change.timeout_min * 60, _auto_rollback, args=(change.id,)
     )
     timer.daemon = True
     change.timer = timer
@@ -566,6 +596,10 @@ def confirm_change(token: str, reason: str) -> dict[str, Any]:
         This is the one call that switches off the automatic rollback, so the
         audit log records why it was switched off.
     """
+    if token.startswith("fleet-"):
+        from netnerd_mcp import fleet
+        return fleet.confirm_fleet(token, reason)
+
     with _lock:
         change = _tokens.get(token)
     if change is None:
@@ -620,14 +654,25 @@ def confirm_change(token: str, reason: str) -> dict[str, Any]:
     return result
 
 
-def rollback(token: str, reason: str = "") -> dict[str, Any]:
+def rollback(token: str, reason: str) -> dict[str, Any]:
     """Undo an applied change and report whether the device matches its backup.
 
     Fires automatically when a change is never confirmed. The result says
     whether the post-rollback config matches the pre-change backup — if it does
     not, the diff shows exactly what is still different rather than claiming
     success.
+
+    Parameters
+    ----------
+    token: the change token whose change should be undone.
+    reason: why it is being undone — recorded in the audit log. Required, like
+        every other device-touching tool: a rollback with no stated reason is
+        the entry a change review most needs to read.
     """
+    if token.startswith("fleet-"):
+        from netnerd_mcp import fleet
+        return fleet.rollback_fleet(token, reason)
+
     with _lock:
         change = _tokens.get(token)
     if change is None:
@@ -688,7 +733,7 @@ def rollback(token: str, reason: str = "") -> dict[str, Any]:
 
     drift = _diff(change.backup, after)
     log.event("rollback", device=target.name, token=token, commands=undo,
-              reason=reason or "manual", restored=not drift)
+              reason=reason, restored=not drift)
 
     return {
         "device": target.name,
@@ -768,6 +813,42 @@ def save_config(device: str, reason: str) -> dict[str, Any]:
     log.event("save", device=target.name, cmd=command, reason=reason)
     return {"device": target.name, "saved": True, "command": command,
             "output": audit.mask(output)}
+
+
+def expire(token: str) -> None:
+    """Drop a planned token that will never be applied.
+
+    A fleet plan that refuses itself has already issued tokens for the devices
+    that would have been fine. Leaving them behind would let an operator apply
+    half a rollout one token at a time, which is the state the staging is
+    there to prevent.
+    """
+    with _lock:
+        change = _tokens.pop(token, None)
+    if change is not None:
+        _cancel_rollback(change)
+        change.state = "expired"
+
+
+def set_timeout(token: str, minutes: int) -> None:
+    """Give one pending token a different unconfirmed window.
+
+    A fleet rollout needs every device to outlast the whole rollout, not just
+    its own stage: a five-minute timer armed in stage one would revert while
+    stage three is still being pushed. The timer is armed at apply time, so
+    changing the window between plan and apply is enough — nothing has started
+    counting yet.
+
+    The mechanism string is rewritten too. It is what plan_change shows the
+    operator and what the audit log records, so leaving it saying five minutes
+    while the device holds thirty would make the report wrong.
+    """
+    with _lock:
+        change = _tokens.get(token)
+    if change is None:
+        return
+    change.confirm_timeout_min = minutes
+    change.mechanism = re.sub(r"\(\d+ min", f"({minutes} min", change.mechanism)
 
 
 def reset() -> None:

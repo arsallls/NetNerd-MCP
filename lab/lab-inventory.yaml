@@ -21,6 +21,26 @@ devices:
     password: netnerd123
     writable: false   # left read-only so the allowlist gate is exercised
 
+  # Fleet targets. A staged rollout needs more than one writable device, and
+  # r2 has to stay read-only for the allowlist gate test — so the fleet is
+  # [r1, r3, r4]. These two sit on their own subnet (see docker-compose.yml)
+  # so they do not widen r1's blast radius.
+  r3:
+    host: localhost
+    port: 2213
+    device_type: cisco_ios
+    username: netnerd
+    password: netnerd123
+    writable: true
+
+  r4:
+    host: localhost
+    port: 2214
+    device_type: cisco_ios
+    username: netnerd
+    password: netnerd123
+    writable: true
+
   # r1's Linux side, reached with an ordinary shell instead of vtysh. FRR has
   # no ntc-templates coverage, so this is the node that proves server-side
   # parsing works over real SSH — `ip route show` and friends do have

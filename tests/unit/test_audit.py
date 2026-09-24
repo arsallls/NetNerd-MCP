@@ -107,3 +107,39 @@ class TestReport:
         log.event("command", device="r1", cmd="snmp-server community pr1vat3 RO",
                   reason="audit")
         assert "pr1vat3" not in log.write_report().read_text()
+
+
+class TestTheAuditTrailIsPrivate:
+    """The transcript is every byte sent to and from the device — running
+    configurations, ACLs, addressing, routing adjacencies. Netmiko keeps the
+    login password and enable secret out of it, so it holds no credentials,
+    but it is a complete record of the network. Group- and world-readable is
+    the wrong default anywhere, and on a shared jump host it means everyone.
+    """
+
+    def test_the_session_files_are_owner_only(self, tmp_path):
+        log = AuditLog("s-perm", tmp_path)
+        log.event("command", device="r1", cmd="show running-config")
+        log.write_report()
+
+        for path in (log.jsonl_path, log.transcript_path, log.report_path):
+            mode = path.stat().st_mode & 0o777
+            assert mode == 0o600, f"{path.name} is {oct(mode)}, not 0600"
+
+    def test_the_directories_are_owner_only(self, tmp_path):
+        base = tmp_path / "audit"
+        log = AuditLog("s-perm", base)
+        log.event("command", device="r1", cmd="show version")
+
+        for path in (base, log.dir):
+            mode = path.stat().st_mode & 0o777
+            assert mode == 0o700, f"{path} is {oct(mode)}, not 0700"
+
+    def test_the_transcript_is_restricted_before_anything_is_written(self, tmp_path):
+        """netmiko opens the transcript itself, so it has to already exist
+        with the right mode — otherwise the first bytes of the SSH session
+        land in a world-readable file."""
+        log = AuditLog("s-perm", tmp_path)
+
+        assert log.transcript_path.exists()
+        assert log.transcript_path.stat().st_mode & 0o777 == 0o600

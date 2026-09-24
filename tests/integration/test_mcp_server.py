@@ -48,7 +48,7 @@ class TestRegistration:
         """The reason is what makes the audit log readable — it is not optional."""
         by_name = {t.name: t for t in _run(server.list_tools())}
         for name in ("show", "get_config", "plan_change", "apply_change",
-                     "confirm_change", "save_config"):
+                     "confirm_change", "rollback", "save_config"):
             schema = by_name[name].input_schema
             assert "reason" in schema["required"], f"{name} does not require a reason"
 
