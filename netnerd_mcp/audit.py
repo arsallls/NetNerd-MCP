@@ -40,6 +40,31 @@ _SECRET_PATTERNS: list[re.Pattern[str]] = [
 _MASK = "********"
 
 
+def _private_dir(path: Path) -> None:
+    """Create a directory only this user can enter.
+
+    What lands in here is the raw SSH transcript of every device touched —
+    running configurations, ACLs, addressing, routing adjacencies. Netmiko
+    filters the login password and enable secret out of it, so it holds no
+    credentials, but it is a complete record of the network. The default 755
+    hands that to every other account on the machine, which on a shared jump
+    host is everyone.
+    """
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        path.chmod(0o700)  # exist_ok=True leaves an existing dir's mode alone
+    except OSError:  # someone else owns it; the write will fail loudly anyway
+        pass
+
+
+def _private_file(path: Path) -> None:
+    """Restrict a freshly created audit file to its owner."""
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
 def mask(text: str) -> str:
     """Redact credential-shaped content before it reaches a result or report."""
     if not text:
@@ -78,7 +103,13 @@ class AuditLog:
         self._events: list[dict[str, Any]] = []
 
         try:
-            self.dir.mkdir(parents=True, exist_ok=True)
+            _private_dir(base_dir)
+            _private_dir(self.dir)
+            # netmiko opens the transcript itself, and whatever mode it uses
+            # is applied when the file is created. Creating it here first means
+            # the SSH session log is owner-only from its first byte.
+            self.transcript_path.touch(mode=0o600, exist_ok=True)
+            _private_file(self.transcript_path)
         except OSError as exc:
             raise AuditError(f"Cannot create audit directory {self.dir}: {exc}") from exc
 
@@ -106,7 +137,7 @@ class AuditLog:
                 # session. Tampering is caught by verify(), not by this.
                 logger.warning("Audit directory %s disappeared — recreating it", self.dir)
                 try:
-                    self.dir.mkdir(parents=True, exist_ok=True)
+                    _private_dir(self.dir)
                     self._append(line)
                 except OSError as exc:
                     self._seq -= 1
@@ -122,8 +153,11 @@ class AuditLog:
             return record
 
     def _append(self, line: str) -> None:
+        first = not self.jsonl_path.exists()
         with self.jsonl_path.open("a", encoding="utf-8") as fh:
             fh.write(line)
+        if first:
+            _private_file(self.jsonl_path)
 
     def events(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -204,6 +238,7 @@ class AuditLog:
         report = "\n".join(lines)
         try:
             self.report_path.write_text(report, encoding="utf-8")
+            _private_file(self.report_path)
         except OSError as exc:
             raise AuditError(f"Cannot write report {self.report_path}: {exc}") from exc
         return self.report_path
