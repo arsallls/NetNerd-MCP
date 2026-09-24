@@ -100,7 +100,7 @@ class TestTransportSelection:
 
 class TestChangeLoop:
     def test_the_plan_says_the_device_enforces_the_rollback(self, device):
-        plan = changes.plan_change("netconf1", [_config("test0", MARKER)],
+        plan = changes.plan_change(device="netconf1", commands=[_config("test0", MARKER)],
                                    reason="checking the mechanism is the device's own")
 
         assert plan["applicable"] is True, plan
@@ -108,7 +108,7 @@ class TestChangeLoop:
         assert "enforced by the device" in plan["rollback"]
 
     def test_a_change_lands_and_survives_confirmation(self, device, transport):
-        plan = changes.plan_change("netconf1", [_config("test0", MARKER)],
+        plan = changes.plan_change(device="netconf1", commands=[_config("test0", MARKER)],
                                    reason="proving the loop end to end")
         assert MARKER not in transport.get_config(device), "planning must not write"
 
@@ -134,7 +134,7 @@ class TestChangeLoop:
         """
         monkeypatch.setattr(settings, "CONFIRM_TIMEOUT_MIN", 5 / 60)  # 5 seconds
 
-        plan = changes.plan_change("netconf1", [_config("ghost0", "should-revert")],
+        plan = changes.plan_change(device="netconf1", commands=[_config("ghost0", "should-revert")],
                                    reason="testing the device-side revert")
         changes.apply_change(plan["token"], reason="applying without confirming")
         assert "ghost0" in transport.get_config(device)
@@ -149,7 +149,7 @@ class TestChangeLoop:
             "the device did not revert an unconfirmed commit on its own"
 
     def test_confirming_is_recorded_with_the_mechanism_that_was_used(self, device):
-        plan = changes.plan_change("netconf1", [_config("test0", MARKER)],
+        plan = changes.plan_change(device="netconf1", commands=[_config("test0", MARKER)],
                                    reason="auditing the mechanism")
         changes.apply_change(plan["token"], reason="operator approved")
         changes.confirm_change(plan["token"], reason="verified in the datastore")
@@ -166,7 +166,7 @@ class TestRefusalsAreNotFailures:
         broken = _config("reject0", MARKER).replace(
             "ianaift:ethernetCsmacd", "ianaift:notARealInterfaceType")
 
-        plan = changes.plan_change("netconf1", [broken], reason="planning an invalid change")
+        plan = changes.plan_change(device="netconf1", commands=[broken], reason="planning an invalid change")
         applied = changes.apply_change(plan["token"], reason="the device should refuse this")
 
         assert applied.get("applied") is False, applied
@@ -177,7 +177,7 @@ class TestRefusalsAreNotFailures:
     def test_a_rejected_change_leaves_no_rollback_armed(self, device):
         broken = _config("reject0", MARKER).replace(
             "ianaift:ethernetCsmacd", "ianaift:notARealInterfaceType")
-        plan = changes.plan_change("netconf1", [broken], reason="planning an invalid change")
+        plan = changes.plan_change(device="netconf1", commands=[broken], reason="planning an invalid change")
         changes.apply_change(plan["token"], reason="the device should refuse this")
 
         token = changes._tokens[plan["token"]]
@@ -187,7 +187,7 @@ class TestRefusalsAreNotFailures:
     def test_the_refusal_is_in_the_audit_trail(self, device):
         broken = _config("reject0", MARKER).replace(
             "ianaift:ethernetCsmacd", "ianaift:notARealInterfaceType")
-        plan = changes.plan_change("netconf1", [broken], reason="planning an invalid change")
+        plan = changes.plan_change(device="netconf1", commands=[broken], reason="planning an invalid change")
         changes.apply_change(plan["token"], reason="the device should refuse this")
 
         blocked = [e for e in audit.current().events()
@@ -206,7 +206,7 @@ class TestReads:
         assert "urn:ietf:params:xml:ns:" in config
 
     def test_a_plan_backs_up_the_datastore_first(self, device):
-        plan = changes.plan_change("netconf1", [_config("test0", MARKER)],
+        plan = changes.plan_change(device="netconf1", commands=[_config("test0", MARKER)],
                                    reason="checking the backup is taken")
         assert plan["backup_lines"] > 0
         assert changes._tokens[plan["token"]].backup.strip().startswith("<")

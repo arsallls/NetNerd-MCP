@@ -80,6 +80,24 @@ class Settings(BaseSettings):
             "here rather than trusted to the caller."
         ),
     )
+    FLEET_TIMEOUT_MIN: int = Field(
+        default=30,
+        description=(
+            "Minutes a staged fleet rollout may stay unconfirmed before every "
+            "device reverts. Longer than CONFIRM_TIMEOUT_MIN because it has to "
+            "outlast the whole rollout: the first stage's rollback must not fire "
+            "while a later stage is still being applied. "
+            "Env: NETNERD_FLEET_TIMEOUT_MIN."
+        ),
+    )
+    FLEET_MAX_PARALLEL: int = Field(
+        default=10,
+        description=(
+            "Devices pushed at once within a single stage. Each one holds an SSH "
+            "session, so this is bounded by what the devices' sshd will accept "
+            "rather than by this process. Env: NETNERD_FLEET_MAX_PARALLEL."
+        ),
+    )
     MAX_OUTPUT_LINES: int = Field(
         default=200,
         description=(

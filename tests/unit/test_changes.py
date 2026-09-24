@@ -88,7 +88,7 @@ class TestTokenGate:
 
     def test_rollback_needs_something_to_undo(self):
         token = _token()  # pending, never applied
-        assert "nothing to roll back" in changes.rollback(token.id)["error"]
+        assert "nothing to roll back" in changes.rollback(token.id, reason="nothing applied")["error"]
 
 
 class TestDestructiveCommandsAreRefused:

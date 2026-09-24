@@ -20,7 +20,7 @@ from typing import Any, Callable
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
-from netnerd_mcp import audit, changes, sessions, topology
+from netnerd_mcp import audit, changes, fleet, sessions, topology
 from netnerd_mcp.config.settings import settings
 from netnerd_mcp.inventory import get_inventory
 from netnerd_mcp.tools import get_config, list_devices, show, telemetry
@@ -70,8 +70,18 @@ Changing configuration:
   5. confirm_change if healthy, rollback if not
   6. save_config  — only once confirmed; changes are not persistent before this
 
-Every tool takes a `reason`. It is written to an audit log the operator can
-read, so make it a real explanation, not a restatement of the command.
+Changing several devices at once: pass `devices` to plan_change instead of
+`device`. The rollout is staged — one device, then a tenth, then the rest —
+and each apply_change call applies ONE stage and stops, having health-checked
+it. A stage that fails rolls back every stage applied so far; a stage that
+loses a routing adjacency halts and waits for you to decide. Results come back
+as counts, naming only the devices that went wrong. confirm_change and
+rollback take the fleet token and act on every device.
+
+Every tool that touches a device takes a `reason`. It is written to an audit
+log the operator can read, so make it a real explanation, not a restatement of
+the command. list_devices, get_transcript and end_session read only local
+state and take none.
 
 Call end_session when the work is done: it closes the SSH sessions and writes
 the report.
@@ -120,6 +130,12 @@ for _t in WRITE_TOOLS:
 
 
 def main() -> None:
+    # Bare `netnerd-mcp` is how the MCP client launches the server, so a
+    # subcommand is the only thing that may take a different path.
+    if len(sys.argv) > 1:
+        from netnerd_mcp.cli import main as cli_main
+        raise SystemExit(cli_main(sys.argv[1:]))
+
     inventory = get_inventory()
     log = audit.current()
     logger.info(
@@ -137,6 +153,7 @@ def main() -> None:
         server.run()
     finally:
         changes.reset()
+        fleet.reset()
         sessions.close_all(reason="server shutdown")
 
 
