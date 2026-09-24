@@ -85,6 +85,23 @@ class TestBlastRadius:
         assert result["partitions"] == [["core", "spur"], ["edge", "leaf"]]
         assert "ambiguous_split" in result
 
+    def test_an_unrelated_island_does_not_become_the_surviving_network(self):
+        """A graph can hold segments that never touch — two sites, a separate
+        lab subnet, gear reached by another path. Measuring the split against
+        the whole graph let the biggest island count as "the network", so the
+        cut device's own side came back as the stranded one: cutting `edge`
+        reported core and spur isolated, and on a two-node segment it named the
+        changed device itself."""
+        _chain()
+        _store(["far-a", "far-b", "far-c"],
+               [("far-a", "Gi0/1", "far-b", "Gi0/0", "lldp"),
+                ("far-b", "Gi0/2", "far-c", "Gi0/0", "lldp")])
+
+        result = topology.query_topology("blast_radius", node="edge", reason="test")
+
+        assert result["isolated"] == ["leaf"], result
+        assert not [n for n in result["isolated"] if n.startswith("far-")]
+
     def test_an_unknown_interface_is_an_error_not_an_all_clear(self):
         """"No link recorded on that interface" must never read as "nothing
         depends on it" — the graph simply may not know the interface."""
